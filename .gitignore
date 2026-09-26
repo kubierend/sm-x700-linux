@@ -1,0 +1,4 @@
+kernel/work/
+work/
+__pycache__/
+*.pyc

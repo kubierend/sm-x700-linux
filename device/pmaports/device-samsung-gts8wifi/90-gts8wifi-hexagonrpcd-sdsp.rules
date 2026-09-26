@@ -1,0 +1,6 @@
+# Start hexagonrpcd for the sensor DSP when its FastRPC node appears.
+# hexagonrpcd-sdsp.service has ConditionPathExists=/dev/fastrpc-sdsp and is wanted by
+# multi-user.target, but the SLPI boots from firmware in the initramfs and its node shows up
+# after that condition was checked (a failed condition is not retried). Pull the unit in
+# from udev instead.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-sdsp.service"

@@ -1,0 +1,4 @@
+# pmOS's stage-1 mdev.conf runs /lib/mdev/persistent-storage for every block device,
+# but no file list copies it in. Without it /dev/disk/by-* stays empty on UFS and the
+# root partition is never found. The file comes from mdev-conf.
+/usr/lib/mdev/persistent-storage

@@ -1,0 +1,11 @@
+# Firmware the kernel loads before the rootfs is mounted (all consumers are built in):
+# GPU SQE/GMU (linux-firmware-qcom) at DRM bind, the ADSP and SLPI images when their
+# remoteprocs auto-boot, and the speaker topology when the ADSP comes up.
+# The device-signed images are installed by gts8wifi-firmware-setup, so a fresh rootfs
+# without them still builds (and boots without GPU acceleration, audio and sensors).
+/usr/lib/firmware/qcom/a730_sqe.fw.zst
+/usr/lib/firmware/qcom/gmu_gen70000.bin.zst
+/usr/lib/firmware/qcom/sm8450/Samsung-Galaxy-Tab-S8-tplg.bin
+/usr/lib/firmware/qcom/sm8450/gts8wifi/a730_zap.*!optional
+/usr/lib/firmware/qcom/sm8450/gts8wifi/adsp.*!optional
+/usr/lib/firmware/qcom/sm8450/gts8wifi/slpi.*!optional

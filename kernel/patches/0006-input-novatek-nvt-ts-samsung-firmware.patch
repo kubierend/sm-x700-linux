@@ -1,0 +1,248 @@
+Input: novatek-nvt-ts: support Samsung's NT36523 firmware
+
+--- a/Documentation/devicetree/bindings/input/touchscreen/novatek,nvt-ts.yaml
++++ b/Documentation/devicetree/bindings/input/touchscreen/novatek,nvt-ts.yaml
+@@ -16,6 +16,7 @@
+   compatible:
+     enum:
+       - novatek,nt11205-ts
++      - novatek,nt36523-ts
+       - novatek,nt36672a-ts
+ 
+   reg:
+--- a/drivers/input/touchscreen/novatek-nvt-ts.c
++++ b/drivers/input/touchscreen/novatek-nvt-ts.c
+@@ -41,6 +41,13 @@
+ #define NVT_TS_TOUCH_UPDATE		2
+ #define NVT_TS_TOUCH_RELEASE		3
+ 
++/* Samsung NT36523 firmware: these mean "down", a lift drops the slot */
++#define NVT_TS_SEC_TOUCH_FINGER		0
++#define NVT_TS_SEC_TOUCH_GLOVE		3
++#define NVT_TS_SEC_TOUCH_PALM		5
++
++#define NVT_TS_SET_PAGE			0xff
++
+ static const int nvt_ts_irq_type[4] = {
+ 	IRQF_TRIGGER_RISING,
+ 	IRQF_TRIGGER_FALLING,
+@@ -51,10 +58,19 @@
+ struct nvt_ts_i2c_chip_data {
+ 	u8 wake_type;
+ 	u8 chip_id;
++	/* If non-zero, select this memory page before every read */
++	u32 event_buf_addr;
++	/*
++	 * Samsung firmware: wake_type/chip_id are unknown and not checked
++	 * (fw_ver and its complement are checked instead), the IRQ trigger
++	 * comes from the DT and touch states use the NVT_TS_SEC_* values.
++	 */
++	bool sec_fw;
+ };
+ 
+ struct nvt_ts_data {
+ 	struct i2c_client *client;
++	const struct nvt_ts_i2c_chip_data *chip;
+ 	struct input_dev *input;
+ 	struct gpio_desc *reset_gpio;
+ 	struct regulator_bulk_data regulators[2];
+@@ -89,14 +105,38 @@
+ 	return 0;
+ }
+ 
++static int nvt_ts_set_page(struct nvt_ts_data *data)
++{
++	u32 addr = data->chip->event_buf_addr;
++	u8 buf[3] = { NVT_TS_SET_PAGE, addr >> 16, addr >> 8 };
++	int ret;
++
++	if (!addr)
++		return 0;
++
++	ret = i2c_master_send(data->client, buf, sizeof(buf));
++	if (ret != sizeof(buf)) {
++		dev_err(&data->client->dev, "Error selecting page 0x%05x: %d\n",
++			addr, ret);
++		return (ret < 0) ? ret : -EIO;
++	}
++
++	return 0;
++}
++
+ static irqreturn_t nvt_ts_irq(int irq, void *dev_id)
+ {
+ 	struct nvt_ts_data *data = dev_id;
+ 	struct device *dev = &data->client->dev;
+-	int i, error, slot, x, y;
++	int i, error, slot, type, x, y;
+ 	bool active;
+ 	u8 *touch;
+ 
++	/* The page is lost whenever the panel (and so the TDDI) resets */
++	error = nvt_ts_set_page(data);
++	if (error)
++		return IRQ_HANDLED;
++
+ 	error = nvt_ts_read_data(data->client, NVT_TS_TOUCH_START, data->buf,
+ 				 data->max_touches * NVT_TS_TOUCH_SIZE);
+ 	if (error)
+@@ -110,21 +150,31 @@
+ 
+ 		slot = touch[0] >> NVT_TS_TOUCH_SLOT_SHIFT;
+ 		if (slot < 1 || slot > data->max_touches) {
+-			dev_warn(dev, "slot %d out of range, ignoring\n", slot);
++			/* Samsung firmware leaves unused entries zeroed */
++			if (!data->chip->sec_fw)
++				dev_warn(dev, "slot %d out of range, ignoring\n", slot);
+ 			continue;
+ 		}
+ 
+-		switch (touch[0] & NVT_TS_TOUCH_TYPE_MASK) {
+-		case NVT_TS_TOUCH_NEW:
+-		case NVT_TS_TOUCH_UPDATE:
+-			active = true;
+-			break;
+-		case NVT_TS_TOUCH_RELEASE:
+-			active = false;
+-			break;
+-		default:
+-			dev_warn(dev, "slot %d unknown state %d\n", slot, touch[0] & 7);
+-			continue;
++		type = touch[0] & NVT_TS_TOUCH_TYPE_MASK;
++		if (data->chip->sec_fw) {
++			/* A lift is reported by dropping the slot */
++			active = type == NVT_TS_SEC_TOUCH_FINGER ||
++				 type == NVT_TS_SEC_TOUCH_GLOVE ||
++				 type == NVT_TS_SEC_TOUCH_PALM;
++		} else {
++			switch (type) {
++			case NVT_TS_TOUCH_NEW:
++			case NVT_TS_TOUCH_UPDATE:
++				active = true;
++				break;
++			case NVT_TS_TOUCH_RELEASE:
++				active = false;
++				break;
++			default:
++				dev_warn(dev, "slot %d unknown state %d\n", slot, type);
++				continue;
++			}
+ 		}
+ 
+ 		slot--;
+@@ -197,7 +247,7 @@
+ static int nvt_ts_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+-	int error, width, height, irq_type;
++	int error, width, height, irq_type, irq_flags;
+ 	struct nvt_ts_data *data;
+ 	const struct nvt_ts_i2c_chip_data *chip;
+ 	struct input_dev *input;
+@@ -216,6 +266,7 @@
+ 		return -EINVAL;
+ 
+ 	data->client = client;
++	data->chip = chip;
+ 	i2c_set_clientdata(client, data);
+ 
+ 	/*
+@@ -236,7 +287,8 @@
+ 		return error;
+ 	}
+ 
+-	data->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	/* Optional: on TDDI parts the reset belongs to the panel */
++	data->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+ 	error = PTR_ERR_OR_ZERO(data->reset_gpio);
+ 	if (error) {
+ 		regulator_bulk_disable(ARRAY_SIZE(data->regulators), data->regulators);
+@@ -246,8 +298,10 @@
+ 
+ 	/* Wait for controller to come out of reset before params read */
+ 	msleep(100);
+-	error = nvt_ts_read_data(data->client, NVT_TS_PARAMETERS_START,
+-				 data->buf, NVT_TS_PARAMS_SIZE);
++	error = nvt_ts_set_page(data);
++	if (!error)
++		error = nvt_ts_read_data(data->client, NVT_TS_PARAMETERS_START,
++					 data->buf, NVT_TS_PARAMS_SIZE);
+ 	gpiod_set_value_cansleep(data->reset_gpio, 1); /* Put back in reset */
+ 	regulator_bulk_disable(ARRAY_SIZE(data->regulators), data->regulators);
+ 	if (error)
+@@ -258,14 +312,34 @@
+ 	data->max_touches = data->buf[NVT_TS_PARAMS_MAX_TOUCH];
+ 	irq_type = data->buf[NVT_TS_PARAMS_IRQ_TYPE];
+ 
+-	if (width > NVT_TS_MAX_SIZE || height >= NVT_TS_MAX_SIZE ||
+-	    data->max_touches > NVT_TS_MAX_TOUCHES ||
+-	    irq_type >= ARRAY_SIZE(nvt_ts_irq_type) ||
+-	    data->buf[NVT_TS_PARAMS_WAKE_TYPE] != chip->wake_type ||
+-	    data->buf[NVT_TS_PARAMS_CHIP_ID] != chip->chip_id) {
+-		dev_err(dev, "Unsupported touchscreen parameters: %*ph\n",
+-			NVT_TS_PARAMS_SIZE, data->buf);
+-		return -EIO;
++	if (chip->sec_fw) {
++		dev_info(dev, "touchscreen parameters: %*ph\n",
++			 NVT_TS_PARAMS_SIZE, data->buf);
++
++		/* buf[0] is the firmware version, buf[1] its complement */
++		if ((u8)(data->buf[0] + data->buf[1]) != 0xff ||
++		    !width || width > NVT_TS_MAX_SIZE ||
++		    !height || height >= NVT_TS_MAX_SIZE) {
++			dev_err(dev, "Firmware info is broken\n");
++			return -EIO;
++		}
++
++		if (!data->max_touches || data->max_touches > NVT_TS_MAX_TOUCHES)
++			data->max_touches = NVT_TS_MAX_TOUCHES;
++
++		irq_flags = 0;
++	} else {
++		if (width > NVT_TS_MAX_SIZE || height >= NVT_TS_MAX_SIZE ||
++		    data->max_touches > NVT_TS_MAX_TOUCHES ||
++		    irq_type >= ARRAY_SIZE(nvt_ts_irq_type) ||
++		    data->buf[NVT_TS_PARAMS_WAKE_TYPE] != chip->wake_type ||
++		    data->buf[NVT_TS_PARAMS_CHIP_ID] != chip->chip_id) {
++			dev_err(dev, "Unsupported touchscreen parameters: %*ph\n",
++				NVT_TS_PARAMS_SIZE, data->buf);
++			return -EIO;
++		}
++
++		irq_flags = nvt_ts_irq_type[irq_type];
+ 	}
+ 
+ 	dev_dbg(dev, "Detected %dx%d touchscreen with %d max touches\n",
+@@ -296,8 +370,7 @@
+ 	input_set_drvdata(input, data);
+ 
+ 	error = devm_request_threaded_irq(dev, client->irq, NULL, nvt_ts_irq,
+-					  IRQF_ONESHOT | IRQF_NO_AUTOEN |
+-						nvt_ts_irq_type[irq_type],
++					  IRQF_ONESHOT | IRQF_NO_AUTOEN | irq_flags,
+ 					  client->name, data);
+ 	if (error) {
+ 		dev_err(dev, "failed to request irq: %d\n", error);
+@@ -323,8 +396,14 @@
+ 	.chip_id = 0x08,
+ };
+ 
++static const struct nvt_ts_i2c_chip_data nvt_nt36523_ts_data = {
++	.event_buf_addr = 0x2fe00,
++	.sec_fw = true,
++};
++
+ static const struct of_device_id nvt_ts_of_match[] = {
+ 	{ .compatible = "novatek,nt11205-ts", .data = &nvt_nt11205_ts_data },
++	{ .compatible = "novatek,nt36523-ts", .data = &nvt_nt36523_ts_data },
+ 	{ .compatible = "novatek,nt36672a-ts", .data = &nvt_nt36672a_ts_data },
+ 	{ }
+ };
+@@ -332,6 +411,7 @@
+ 
+ static const struct i2c_device_id nvt_ts_i2c_id[] = {
+ 	{ "nt11205-ts", (unsigned long) &nvt_nt11205_ts_data },
++	{ "nt36523-ts", (unsigned long) &nvt_nt36523_ts_data },
+ 	{ "nt36672a-ts", (unsigned long) &nvt_nt36672a_ts_data },
+ 	{ }
+ };

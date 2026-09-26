@@ -1,0 +1,89 @@
+drm/msm/dsi: configure both bonded PHYs first; don't re-arm the error irq
+
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -85,6 +85,24 @@
+ 	}
+ }
+ 
++/*
++ * Bring-up switch. dsi_error() masks the error interrupt and schedules
++ * err_work, and err_work re-arms it; if the error condition is still present
++ * that is a self-sustaining loop. On the SM-X700 an unresolved FIFO error
++ * (DSI_ERR_STATE_FIFO) re-armed at roughly 55k interrupts/second, which
++ * starved the CPU badly enough that UFS reads timed out with DID_ERROR and
++ * the initramfs could not mount the root partition at all -- a display
++ * problem presenting as unbootable storage.
++ *
++ * With this false (the default) the first error is still reported and then
++ * the interrupt stays masked, so a misconfigured link degrades to a bad
++ * picture instead of an unbootable system. Writable at runtime via
++ * /sys/module/msm/parameters/dsi_err_rearm to re-arm while debugging.
++ */
++static bool dsi_err_rearm;
++MODULE_PARM_DESC(dsi_err_rearm, "Re-arm the DSI error interrupt after each error (default false)");
++module_param(dsi_err_rearm, bool, 0600);
++
+ #define DSI_ERR_STATE_ACK			0x0000
+ #define DSI_ERR_STATE_TIMEOUT			0x0001
+ #define DSI_ERR_STATE_DLN0_PHY			0x0002
+@@ -1488,7 +1506,8 @@
+ 	msm_host->err_work_state = 0;
+ 
+ 	/* enable dsi error interrupt */
+-	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 1);
++	if (dsi_err_rearm)
++		dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 1);
+ }
+ 
+ static void dsi_ack_err_status(struct msm_dsi_host *msm_host)
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -74,17 +74,30 @@
+ 	int ret;
+ 
+ 	if (!IS_BONDED_DSI()) {
++		/*
++		 * Host registration can synchronously attach the panel and bind
++		 * DRM, so PHY mode and clock routing must already be configured.
++		 */
++		msm_dsi_phy_set_usecase(msm_dsi->phy, MSM_DSI_PHY_STANDALONE);
++		msm_dsi_host_set_phy_mode(msm_dsi->host, msm_dsi->phy);
++
+ 		ret = msm_dsi_host_register(msm_dsi->host);
+ 		if (ret)
+ 			return ret;
+-
+-		msm_dsi_phy_set_usecase(msm_dsi->phy, MSM_DSI_PHY_STANDALONE);
+-		msm_dsi_host_set_phy_mode(msm_dsi->host, msm_dsi->phy);
+ 	} else if (other_dsi) {
+ 		struct msm_dsi *master_link_dsi = IS_MASTER_DSI_LINK(id) ?
+ 							msm_dsi : other_dsi;
+ 		struct msm_dsi *slave_link_dsi = IS_MASTER_DSI_LINK(id) ?
+ 							other_dsi : msm_dsi;
++
++		/* Configure both links before registration can start a modeset. */
++		msm_dsi_phy_set_usecase(clk_master_dsi->phy,
++					MSM_DSI_PHY_MASTER);
++		msm_dsi_phy_set_usecase(clk_slave_dsi->phy,
++					MSM_DSI_PHY_SLAVE);
++		msm_dsi_host_set_phy_mode(msm_dsi->host, msm_dsi->phy);
++		msm_dsi_host_set_phy_mode(other_dsi->host, other_dsi->phy);
++
+ 		/* Register slave host first, so that slave DSI device
+ 		 * has a chance to probe, and do not block the master
+ 		 * DSI device's probe.
+@@ -99,13 +112,6 @@
+ 		if (ret)
+ 			return ret;
+ 
+-		/* PLL0 is to drive both 2 DSI link clocks in bonded DSI mode. */
+-		msm_dsi_phy_set_usecase(clk_master_dsi->phy,
+-					MSM_DSI_PHY_MASTER);
+-		msm_dsi_phy_set_usecase(clk_slave_dsi->phy,
+-					MSM_DSI_PHY_SLAVE);
+-		msm_dsi_host_set_phy_mode(msm_dsi->host, msm_dsi->phy);
+-		msm_dsi_host_set_phy_mode(other_dsi->host, other_dsi->phy);
+ 	}
+ 
+ 	return 0;

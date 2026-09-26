@@ -1,0 +1,159 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer="kubierend <degroe44@gmail.com>"
+pkgname=device-samsung-gts8wifi
+pkgdesc="Samsung Galaxy Tab S8 (Wi-Fi)"
+pkgver=1.0
+pkgrel=3
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck"
+depends="
+	linux-postmarketos-qcom-sm8450
+	postmarketos-base
+	mkbootimg
+	android-tools
+	mdev-conf
+	linux-firmware-qcom
+	linux-firmware-ath11k
+	linux-firmware-qca
+	mesa-vulkan-freedreno
+	alsa-ucm-conf
+	bootmac
+	hexagonrpcd
+	hexagonrpcd-systemd
+	libssc
+	iio-sensor-proxy
+	android-tools-lpdump
+	device-mapper
+	python3
+	zstd
+"
+makedepends="devicepkg-dev linux-firmware-qcom python3 zstd"
+subpackages="$pkgname-tools $pkgname-plasma"
+source="
+	deviceinfo
+	mkinitfs-mdev.files
+	mkinitfs-firmware.files
+	sensor-vdd.service
+	81-libssc-samsung-gts8wifi.rules
+	90-gts8wifi-hexagonrpcd-sdsp.rules
+	50-wcn6855-wifi
+	gts8wifi-firmware-setup
+	gts8wifi-sensors-setup
+	mk-ath11k-board2.py
+	f2fs_extract.py
+	mk-tplg.py
+	kwinrc
+	ucm2/Samsung-Galaxy-Tab-S8.conf
+	ucm2/HiFi.conf
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+
+	# Speaker topology: linux-firmware's SM8450-HDK one with the I2S data line moved
+	# from SD0 to SD1, where the CS35L45 amplifiers listen (see mk-tplg.py).
+	zstd -dc /usr/lib/firmware/qcom/sm8450/SM8450-HDK-tplg.bin.zst > "$srcdir"/SM8450-HDK-tplg.bin
+	python3 "$srcdir"/mk-tplg.py "$srcdir"/SM8450-HDK-tplg.bin \
+		"$srcdir"/Samsung-Galaxy-Tab-S8-tplg.bin
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+
+	install -Dm644 "$srcdir"/mkinitfs-mdev.files \
+		"$pkgdir"/usr/share/mkinitfs/files/50-gts8wifi-mdev.files
+	install -Dm644 "$srcdir"/mkinitfs-firmware.files \
+		"$pkgdir"/usr/share/mkinitfs/files/60-gts8wifi-firmware.files
+
+	# Device-signed firmware and 5 GHz Wi-Fi data come from the tablet's own partitions.
+	install -Dm755 "$srcdir"/gts8wifi-firmware-setup "$pkgdir"/usr/bin/gts8wifi-firmware-setup
+	install -Dm755 "$srcdir"/gts8wifi-sensors-setup "$pkgdir"/usr/bin/gts8wifi-sensors-setup
+	install -Dm644 "$srcdir"/mk-ath11k-board2.py "$pkgdir"/usr/libexec/gts8wifi/mk-ath11k-board2.py
+	install -Dm644 "$srcdir"/f2fs_extract.py "$pkgdir"/usr/libexec/gts8wifi/f2fs_extract.py
+
+	# Audio: topology (loaded as qcom/sm8450/<card model>-tplg.bin) and UCM. The card
+	# driver is "sm8450", so alsa-ucm-conf looks in conf.d/sm8450/<card name>.conf.
+	install -Dm644 "$srcdir"/Samsung-Galaxy-Tab-S8-tplg.bin \
+		"$pkgdir"/usr/lib/firmware/qcom/sm8450/Samsung-Galaxy-Tab-S8-tplg.bin
+	install -Dm644 "$srcdir"/Samsung-Galaxy-Tab-S8.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/conf.d/sm8450/Samsung-Galaxy-Tab-S8.conf
+	install -Dm644 "$srcdir"/HiFi.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/Qualcomm/sm8450/gts8wifi/HiFi.conf
+
+	# Wi-Fi across suspend: WCN6855 comes back in MHI SYS_ERR, so ath11k is unloaded
+	# before sleep and reloaded after (see the hook).
+	install -Dm755 "$srcdir"/50-wcn6855-wifi \
+		"$pkgdir"/usr/lib/systemd/system-sleep/50-wcn6855-wifi
+
+	# SLPI sensors (auto-rotate). The sensor rail is switched on from userspace:
+	# declaring it always-on in the DTS hangs the boot on this board.
+	install -Dm644 "$srcdir"/sensor-vdd.service \
+		"$pkgdir"/usr/lib/systemd/system/sensor-vdd.service
+	install -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../sensor-vdd.service \
+		"$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/sensor-vdd.service
+	install -Dm644 "$srcdir"/81-libssc-samsung-gts8wifi.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/81-libssc-samsung-gts8wifi.rules
+	install -Dm644 "$srcdir"/90-gts8wifi-hexagonrpcd-sdsp.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/90-gts8wifi-hexagonrpcd-sdsp.rules
+}
+
+tools() {
+	pkgdesc="Debugging and hardware tools for the Galaxy Tab S8 port (metapackage)"
+	depends="
+		i2c-tools
+		libgpiod
+		evtest
+		libinput-tools
+		iw
+		bluez
+		alsa-utils
+		pciutils
+		usbutils
+		util-linux-misc
+		kmscube
+		vulkan-tools
+		btop
+		stress-ng
+		strace
+	"
+	mkdir -p "$subpkgdir"
+}
+
+plasma() {
+	pkgdesc="Desktop apps for the Galaxy Tab S8 with Plasma (metapackage)"
+	# Installed automatically together with the Plasma Desktop UI.
+	install_if="$pkgname=$pkgver-r$pkgrel postmarketos-ui-plasma-desktop"
+	depends="
+		plasma-keyboard
+		dolphin
+		ark
+		7zip
+		konsole
+		kate
+		okular
+		gwenview
+		spectacle
+		kcalc
+		haruna
+		elisa
+		chromium
+		discover
+		discover-backend-flatpak
+		flatpak
+		plasma-systemmonitor
+		filelight
+		partitionmanager
+		kdeconnect
+		kio-extras
+		ffmpegthumbs
+		kdegraphics-thumbnailers
+		exfatprogs
+		ntfs-3g
+	"
+	install -Dm644 "$srcdir"/kwinrc "$subpkgdir"/etc/xdg/kwinrc
+}
+
+sha512sums="SKIP"

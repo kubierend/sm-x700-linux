@@ -1,0 +1,209 @@
+drm/msm/dpu: use one ACTIVE CTL for bonded DSI on SM8450
+
+--- a/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_8_1_sm8450.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_8_1_sm8450.h
+@@ -36,17 +36,16 @@
+ 	},
+ };
+ 
+-/* FIXME: get rid of DPU_CTL_SPLIT_DISPLAY in favour of proper ACTIVE_CTL support */
+ static const struct dpu_ctl_cfg sm8450_ctl[] = {
+ 	{
+ 		.name = "ctl_0", .id = CTL_0,
+ 		.base = 0x15000, .len = 0x204,
+-		.features = BIT(DPU_CTL_SPLIT_DISPLAY) | CTL_SC7280_MASK,
++		.features = CTL_SC7280_MASK,
+ 		.intr_start = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 9),
+ 	}, {
+ 		.name = "ctl_1", .id = CTL_1,
+ 		.base = 0x16000, .len = 0x204,
+-		.features = BIT(DPU_CTL_SPLIT_DISPLAY) | CTL_SC7280_MASK,
++		.features = CTL_SC7280_MASK,
+ 		.intr_start = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 10),
+ 	}, {
+ 		.name = "ctl_2", .id = CTL_2,
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -1282,7 +1282,11 @@
+ 			return;
+ 		}
+ 
+-		phys->hw_ctl = i < num_ctl ? to_dpu_hw_ctl(hw_ctl[i]) : NULL;
++		/* Use first (and only) CTL if active CTLs are supported. */
++		if (num_ctl == 1)
++			phys->hw_ctl = to_dpu_hw_ctl(hw_ctl[0]);
++		else
++			phys->hw_ctl = i < num_ctl ? to_dpu_hw_ctl(hw_ctl[i]) : NULL;
+ 		if (!phys->hw_ctl) {
+ 			DPU_ERROR_ENC(dpu_enc,
+ 				"no ctl block assigned at idx: %d\n", i);
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
+@@ -59,6 +59,8 @@
+ 		return;
+ 
+ 	intf_cfg.intf = phys_enc->hw_intf->idx;
++	if (phys_enc->split_role == ENC_ROLE_MASTER)
++		intf_cfg.intf_master = phys_enc->hw_intf->idx;
+ 	intf_cfg.intf_mode_sel = DPU_CTL_MODE_SEL_CMD;
+ 	intf_cfg.stream_sel = cmd_enc->stream_sel;
+ 	intf_cfg.mode_3d = dpu_encoder_helper_get_3d_blend_mode(phys_enc);
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -298,6 +298,8 @@
+ 	if (phys_enc->hw_cdm)
+ 		intf_cfg.cdm = phys_enc->hw_cdm->idx;
+ 	intf_cfg.intf = phys_enc->hw_intf->idx;
++	if (phys_enc->split_role == ENC_ROLE_MASTER)
++		intf_cfg.intf_master = phys_enc->hw_intf->idx;
+ 	intf_cfg.intf_mode_sel = DPU_CTL_MODE_SEL_VID;
+ 	intf_cfg.stream_sel = 0; /* Don't care value for video mode */
+ 	intf_cfg.mode_3d = dpu_encoder_helper_get_3d_blend_mode(phys_enc);
+@@ -372,7 +374,8 @@
+ static bool dpu_encoder_phys_vid_needs_single_flush(
+ 		struct dpu_encoder_phys *phys_enc)
+ {
+-	return phys_enc->split_role != ENC_ROLE_SOLO;
++	return !(phys_enc->hw_ctl->caps->features & BIT(DPU_CTL_ACTIVE_CFG)) &&
++		phys_enc->split_role != ENC_ROLE_SOLO;
+ }
+ 
+ static void dpu_encoder_phys_vid_atomic_mode_set(
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+@@ -548,6 +548,7 @@
+ 	u32 dsc_active = 0;
+ 	u32 wb_active = 0;
+ 	u32 mode_sel = 0;
++	u32 merge_3d_active = 0;
+ 
+ 	/* CTL_TOP[31:28] carries group_id to collate CTL paths
+ 	 * per VM. Explicitly disable it until VM support is
+@@ -562,6 +563,7 @@
+ 	intf_active = DPU_REG_READ(c, CTL_INTF_ACTIVE);
+ 	wb_active = DPU_REG_READ(c, CTL_WB_ACTIVE);
+ 	dsc_active = DPU_REG_READ(c, CTL_DSC_ACTIVE);
++	merge_3d_active = DPU_REG_READ(c, CTL_MERGE_3D_ACTIVE);
+ 
+ 	if (cfg->intf)
+ 		intf_active |= BIT(cfg->intf - INTF_0);
+@@ -572,14 +574,17 @@
+ 	if (cfg->dsc)
+ 		dsc_active |= cfg->dsc;
+ 
++	if (cfg->merge_3d)
++		merge_3d_active |= BIT(cfg->merge_3d - MERGE_3D_0);
++
+ 	DPU_REG_WRITE(c, CTL_TOP, mode_sel);
+ 	DPU_REG_WRITE(c, CTL_INTF_ACTIVE, intf_active);
+ 	DPU_REG_WRITE(c, CTL_WB_ACTIVE, wb_active);
+ 	DPU_REG_WRITE(c, CTL_DSC_ACTIVE, dsc_active);
++	DPU_REG_WRITE(c, CTL_MERGE_3D_ACTIVE, merge_3d_active);
+ 
+-	if (cfg->merge_3d)
+-		DPU_REG_WRITE(c, CTL_MERGE_3D_ACTIVE,
+-			      BIT(cfg->merge_3d - MERGE_3D_0));
++	if (cfg->intf_master)
++		DPU_REG_WRITE(c, CTL_INTF_MASTER, BIT(cfg->intf_master - INTF_0));
+ 
+ 	if (cfg->cdm)
+ 		DPU_REG_WRITE(c, CTL_CDM_ACTIVE, cfg->cdm);
+@@ -623,6 +628,7 @@
+ {
+ 	struct dpu_hw_blk_reg_map *c = &ctx->hw;
+ 	u32 intf_active = 0;
++	u32 intf_master = 0;
+ 	u32 wb_active = 0;
+ 	u32 merge3d_active = 0;
+ 	u32 dsc_active;
+@@ -649,6 +655,10 @@
+ 		intf_active = DPU_REG_READ(c, CTL_INTF_ACTIVE);
+ 		intf_active &= ~BIT(cfg->intf - INTF_0);
+ 		DPU_REG_WRITE(c, CTL_INTF_ACTIVE, intf_active);
++
++		intf_master = DPU_REG_READ(c, CTL_INTF_MASTER);
++		if (intf_master == BIT(cfg->intf - INTF_0))
++			DPU_REG_WRITE(c, CTL_INTF_MASTER, 0);
+ 	}
+ 
+ 	if (cfg->wb) {
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
+@@ -36,6 +36,7 @@
+ /**
+  * struct dpu_hw_intf_cfg :Describes how the DPU writes data to output interface
+  * @intf :                 Interface id
++ * @intf_master:           Master interface id in the dual pipe topology
+  * @mode_3d:               3d mux configuration
+  * @merge_3d:              3d merge block used
+  * @intf_mode_sel:         Interface mode, cmd / vid
+@@ -45,6 +46,7 @@
+  */
+ struct dpu_hw_intf_cfg {
+ 	enum dpu_intf intf;
++	enum dpu_intf intf_master;
+ 	enum dpu_wb wb;
+ 	enum dpu_3d_blend_mode mode_3d;
+ 	enum dpu_merge_3d merge_3d;
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c
+@@ -59,6 +59,7 @@
+ 
+ 	/* Clear, setup lists */
+ 	memset(rm, 0, sizeof(*rm));
++	rm->has_legacy_ctls = (cat->mdss_ver->core_major_ver < 5);
+ 
+ 	/* Interrogate HW catalog and create tracking items for hw blocks */
+ 	for (i = 0; i < cat->mixer_count; i++) {
+@@ -376,10 +377,14 @@
+ 	int i = 0, j, num_ctls;
+ 	bool needs_split_display;
+ 
+-	/* each hw_intf needs its own hw_ctrl to program its control path */
+-	num_ctls = top->num_intf;
+-
+-	needs_split_display = _dpu_rm_needs_split_display(top);
++	if (rm->has_legacy_ctls) {
++		num_ctls = top->num_intf;
++		needs_split_display = _dpu_rm_needs_split_display(top);
++	} else {
++		/* ACTIVE CTL handles all outputs of a bonded DSI display. */
++		num_ctls = 1;
++		needs_split_display = false;
++	}
+ 
+ 	for (j = 0; j < ARRAY_SIZE(rm->ctl_blks); j++) {
+ 		const struct dpu_hw_ctl *ctl;
+@@ -397,7 +402,8 @@
+ 
+ 		DPU_DEBUG("ctl %d caps 0x%lX\n", j + CTL_0, features);
+ 
+-		if (needs_split_display != has_split_display)
++		if (rm->has_legacy_ctls &&
++		    needs_split_display != has_split_display)
+ 			continue;
+ 
+ 		ctl_idx[i] = j;
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.h
+@@ -23,6 +23,7 @@
+  * @dspp_blks: array of dspp hardware resources
+  * @hw_sspp: array of sspp hardware resources
+  * @cdm_blk: cdm hardware resource
++ * @has_legacy_ctls: DPU uses pre-ACTIVE CTL blocks
+  */
+ struct dpu_rm {
+ 	struct dpu_hw_blk *pingpong_blks[PINGPONG_MAX - PINGPONG_0];
+@@ -35,6 +36,7 @@
+ 	struct dpu_hw_blk *dsc_blks[DSC_MAX - DSC_0];
+ 	struct dpu_hw_sspp *hw_sspp[SSPP_MAX - SSPP_NONE];
+ 	struct dpu_hw_blk *cdm_blk;
++	bool has_legacy_ctls;
+ };
+ 
+ struct dpu_rm_sspp_requirements {
+@@ -120,4 +122,3 @@
+ }
+ 
+ #endif /* __DPU_RM_H__ */
+-

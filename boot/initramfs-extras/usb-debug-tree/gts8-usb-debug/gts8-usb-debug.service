@@ -1,0 +1,15 @@
+[Unit]
+Description=SM-X700 USB debug network
+After=systemd-udev-trigger.service
+Before=sshd.service unudhcpd@usb0.service
+ConditionPathExists=/sys/kernel/config/usb_gadget/g1/functions/ncm.usb0/ifname
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /run/gts8-usb-debug/network.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

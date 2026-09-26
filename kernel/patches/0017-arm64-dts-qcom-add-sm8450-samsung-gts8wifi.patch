@@ -1,0 +1,1278 @@
+arm64: dts: qcom: add the Samsung Galaxy Tab S8 (SM-X700)
+
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -295,3 +295,4 @@
+ dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-microsoft-romulus13.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-microsoft-romulus15.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-qcp.dtb
++dtb-$(CONFIG_ARCH_QCOM) += sm8450-samsung-gts8wifi.dtb
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8450-samsung-gts8wifi.dts
+@@ -0,0 +1,1266 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung Galaxy Tab S8 Wi-Fi (SM-X700, "gts8wifi"), Snapdragon 8 Gen 1.
++ *
++ * Derived from sm8450-samsung-gts8pwifi.dts (Galaxy Tab S8+, aaronsb/
++ * sm-x800-linux) and checked against Samsung's gts8wifi_eur_open_w00_r08.dts
++ * and the live Android FDT of a board-revision-8 unit wherever the two
++ * tablets differ.
++ *
++ * The device is booted by uniLoader from the boot partition, which does not
++ * patch the DT: the memory map and the kernel command line live here.
++ */
++
++/dts-v1/;
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include <dt-bindings/interconnect/qcom,sm8450.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/phy/phy.h>
++#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
++
++#include "sm8450.dtsi"
++#include "pm8350.dtsi"
++#include "pm8350c.dtsi"
++#include "pmk8350.dtsi"
++
++/ {
++	model = "Samsung Galaxy Tab S8 (Wi-Fi)";
++	compatible = "samsung,gts8wifi", "qcom,sm8450";
++	chassis-type = "tablet";
++
++	/* ABL's DTB selection for this board (CSC EUX, revision 8). */
++	qcom,msm-id = <0x1c9 0x10000>, <0x1e2 0x10000>;
++	qcom,board-id = <0x10008 0x08>;
++
++	wcn6855-pmu {
++		compatible = "qcom,wcn6855-pmu";
++
++		pinctrl-0 = <&bt_en>, <&wlan_en>, <&xo_clk_default>;
++		pinctrl-names = "default";
++
++		wlan-enable-gpios = <&tlmm 80 GPIO_ACTIVE_HIGH>;
++		bt-enable-gpios = <&tlmm 81 GPIO_ACTIVE_HIGH>;
++		swctrl-gpios = <&tlmm 82 GPIO_ACTIVE_HIGH>;
++		xo-clk-gpios = <&tlmm 204 GPIO_ACTIVE_HIGH>;
++
++		vddio-supply = <&vreg_s10b_1p8>;
++		vddaon-supply = <&vreg_s11b_0p95>;
++		vddpmu-supply = <&vreg_s12b_1p25>;
++		vddpmumx-supply = <&vreg_s2e_0p85>;
++		vddpmucx-supply = <&vreg_s11b_0p95>;
++		vddrfa0p95-supply = <&vreg_s11b_0p95>;
++		vddrfa1p3-supply = <&vreg_s12b_1p25>;
++		vddrfa1p9-supply = <&vreg_s1c_1p86>;
++		vddpcie1p3-supply = <&vreg_s12b_1p25>;
++		vddpcie1p9-supply = <&vreg_s1c_1p86>;
++
++		regulators {
++			vreg_pmu_rfa_cmn_0p8: ldo0 {
++				regulator-name = "vreg_pmu_rfa_cmn_0p8";
++			};
++
++			vreg_pmu_aon_0p8: ldo1 {
++				regulator-name = "vreg_pmu_aon_0p8";
++			};
++
++			vreg_pmu_wlcx_0p8: ldo2 {
++				regulator-name = "vreg_pmu_wlcx_0p8";
++			};
++
++			vreg_pmu_wlmx_0p8: ldo3 {
++				regulator-name = "vreg_pmu_wlmx_0p8";
++			};
++
++			vreg_pmu_btcmx_0p8: ldo4 {
++				regulator-name = "vreg_pmu_btcmx_0p8";
++			};
++
++			vreg_pmu_pcie_1p8: ldo5 {
++				regulator-name = "vreg_pmu_pcie_1p8";
++			};
++
++			vreg_pmu_pcie_0p9: ldo6 {
++				regulator-name = "vreg_pmu_pcie_0p9";
++			};
++
++			vreg_pmu_rfa_0p8: ldo7 {
++				regulator-name = "vreg_pmu_rfa_0p8";
++			};
++
++			vreg_pmu_rfa_1p2: ldo8 {
++				regulator-name = "vreg_pmu_rfa_1p2";
++			};
++
++			vreg_pmu_rfa_1p7: ldo9 {
++				regulator-name = "vreg_pmu_rfa_1p7";
++			};
++		};
++	};
++
++	/* qcom_geni_serial fails with "Invalid line -19" without an alias. */
++	aliases {
++		serial0 = &uart7;
++		serial1 = &uart20;
++	};
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		/*
++		 * uniLoader passes no command line.
++		 * - arm-smmu.disable_bypass=0: the bootloader leaves the display
++		 *   scanout behind the SMMU; faulting it blanks the panel.
++		 * - usbcore.autosuspend=-1: USB host autosuspend hangs the SoC.
++		 * - plymouth.enable=0: plymouth and fbcon fight over the
++		 *   framebuffer until something quits plymouth.
++		 * The pmOS initramfs finds its partitions by the pmOS_boot/pmOS_root
++		 * labels; boot/build-boot-img.sh can add pmos_*_uuid for a
++		 * specific install.
++		 */
++		bootargs = "console=tty0 quiet loglevel=4 panic=10 plymouth.enable=0 arm-smmu.disable_bypass=0 usbcore.autosuspend=-1 pmos_rootfsopts=defaults";
++
++		framebuffer: framebuffer@b8000000 {
++			compatible = "simple-framebuffer";
++			reg = <0x0 0xb8000000 0x0 0x2b00000>;
++
++			/* The panel is natively portrait. */
++			width = <1600>;
++			height = <2560>;
++			stride = <(1600 * 4)>;
++			format = "a8r8g8b8";
++
++			/*
++			 * simpledrm holds the display clocks and GDSC until msm
++			 * takes the aperture over; without them the block is torn
++			 * down mid-boot.
++			 */
++			clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
++				 <&gcc GCC_DISP_HF_AXI_CLK>,
++				 <&gcc GCC_DISP_SF_AXI_CLK>,
++				 <&dispcc DISP_CC_MDSS_MDP_CLK>,
++				 <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
++			power-domains = <&dispcc MDSS_GDSC>;
++
++			/*
++			 * The DPU also needs a bandwidth vote to keep fetching
++			 * this buffer. The interconnect boot floor is dropped at
++			 * sync_state (~10 s); with no display vote the panel
++			 * underruns and blanks. The _disp BCMs have no keepalive.
++			 */
++			interconnects = <&mmss_noc MASTER_MDP_DISP 0
++					 &mc_virt SLAVE_EBI1_DISP 0>;
++			interconnect-names = "mdp0-mem";
++		};
++	};
++
++	/*
++	 * sm8450.dtsi has a zero-size memory node for ABL to fill in, which
++	 * uniLoader does not do. Banks as on the Tab S8+ (8 GiB).
++	 */
++	/delete-node/ memory@a0000000;
++
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x0 0x6a000000>,
++		      <0x0 0xf1c00000 0x0 0x0e400000>,
++		      <0x8 0x00000000 0x0 0x3ab00000>,
++		      <0x8 0x40000000 0x1 0x40000000>,
++		      <0x8 0x3b100000 0x0 0x01e00000>;
++	};
++
++	/* Panel LDO enable (stock fixed_regulator@1), left on by the bootloader. */
++	panel_ldo: regulator-panel-ldo {
++		compatible = "regulator-fixed";
++		regulator-name = "panel_ldo_en";
++		gpio = <&tlmm 34 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++
++	/*
++	 * Display-bias buck enable (AVDD/AVEE, stock fixed_regulator@2). Always
++	 * on: panel-novatek-nt36523 takes a single supply, so there is nowhere
++	 * to sequence a second rail.
++	 */
++	panel_buck: regulator-panel-buck {
++		compatible = "regulator-fixed";
++		regulator-name = "panel_buck_en";
++		gpio = <&tlmm 2 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		regulator-always-on;
++	};
++
++	/*
++	 * Runtime switch for the SLPI sensor_vdd rail (pm8350c L2C). Declaring
++	 * that rail always-on or boot-on hangs the boot on this board, so it
++	 * stays off until userspace (sensor-vdd.service) writes "enabled" to
++	 * /sys/devices/platform/sensor-vdd/state.
++	 */
++	sensor_vdd_switch: sensor-vdd {
++		compatible = "regulator-output";
++		vout-supply = <&vreg_l2c_1p8>;
++	};
++
++	/* S Pen AVDD (stock fixed_regulator0), owned by the wacom-wez01 driver. */
++	wacom_avdd: regulator-wacom-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "wacom_avdd";
++		gpio = <&tlmm 167 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++
++	vph_pwr: regulator-vph-pwr {
++		compatible = "regulator-fixed";
++		regulator-name = "vph_pwr";
++		regulator-min-microvolt = <3700000>;
++		regulator-max-microvolt = <3700000>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	/* Samsung reservations, from the live Android FDT (revision 8). */
++	reserved-memory {
++		kaslr-region@b01ff000 {
++			reg = <0x0 0xb01ff000 0x0 0x1000>;
++			no-map;
++		};
++
++		/* Hypervisor-owned, but linearly mapped by the Android kernel. */
++		uh-heap-region@b0200000 {
++			reg = <0x0 0xb0200000 0x0 0x40000>;
++		};
++
++		uh-guest-region@b1000000 {
++			reg = <0x0 0xb1000000 0x0 0x1400000>;
++		};
++
++		sec-debug-pool@800100000 {
++			reg = <0x8 0x00100000 0x0 0x000ff000>;
++			no-map;
++		};
++
++		sec-debug-log@8001ff000 {
++			reg = <0x8 0x001ff000 0x0 0x00901000>;
++			no-map;
++		};
++
++		google-debug-kinfo@800b00000 {
++			reg = <0x8 0x00b00000 0x0 0x00001000>;
++			no-map;
++		};
++
++		hdm@800b01000 {
++			reg = <0x8 0x00b01000 0x0 0x00001000>;
++			no-map;
++		};
++
++		sec-rdx@800c00000 {
++			reg = <0x8 0x00c00000 0x0 0x0ad00000>;
++			no-map;
++		};
++
++		xbl-ramdump@a7d00000 {
++			reg = <0x0 0xa7d00000 0x0 0x00300000>;
++			no-map;
++		};
++
++		/*
++		 * The bootloader framebuffer. /chosen/framebuffer does not
++		 * reserve it, and early allocations landing here corrupt the
++		 * live scanout.
++		 */
++		splash-region@b8000000 {
++			reg = <0x0 0xb8000000 0x0 0x2b00000>;
++			no-map;
++		};
++	};
++
++	/*
++	 * DP AUX/SBU analog switch as stock drives it (secdp aux-en/aux-sel):
++	 * gpio125 low enables it, gpio108 high selects the flipped plug side.
++	 * The part number is unknown, so no vendor compatible is claimed.
++	 */
++	sbu-mux {
++		compatible = "gpio-sbu-mux";
++		enable-gpios = <&tlmm 125 GPIO_ACTIVE_LOW>;
++		select-gpios = <&tlmm 108 GPIO_ACTIVE_HIGH>;
++		orientation-switch;
++		mode-switch;
++
++		port {
++			sbu_mux_con: endpoint {
++				remote-endpoint = <&max77705_con_sbu>;
++			};
++		};
++	};
++
++	/*
++	 * S Pen: Wacom WEZ01 EMR digitizer at 0x56 on the QUP SE14 pins. SE14
++	 * has no FIFO, so geni-i2c is forced onto GPI DMA, which wedges on this
++	 * SoC. &i2c14 stays disabled and the pins are bit-banged; i2c-gpio also
++	 * handles the chip's clock stretching.
++	 */
++	wacom_i2c: i2c-wacom {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 52 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 53 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <5>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&wacom_i2c_gpio>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		wacom@56 {
++			compatible = "wacom,w90xx";
++			reg = <0x56>;
++			interrupt-parent = <&tlmm>;
++			interrupts = <51 IRQ_TYPE_LEVEL_LOW>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&wacom_irq_default>, <&wacom_pdct_default>;
++			vdd-supply = <&wacom_avdd>;
++			wacom,irq-gpio = <&tlmm 51 GPIO_ACTIVE_LOW>;
++			wacom,fwe-gpio = <&tlmm 54 GPIO_ACTIVE_HIGH>;
++			wacom,pdct-gpio = <&tlmm 155 GPIO_ACTIVE_LOW>;
++			/* Stock "invert <1 0 1>": invert x, then swap x/y. */
++			wacom,invert-x;
++			wacom,swap-xy;
++			wacom,fw_path = "wez01_gts8.bin";
++		};
++	};
++
++	/* Stock gpio_keys/vol_up. */
++	gpio-keys {
++		compatible = "gpio-keys";
++		pinctrl-names = "default";
++		pinctrl-0 = <&key_vol_up_default>;
++
++		key-volume-up {
++			label = "volume_up";
++			gpios = <&pm8350_gpios 6 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_VOLUMEUP>;
++			linux,input-type = <EV_KEY>;
++			debounce-interval = <15>;
++			wakeup-source;
++		};
++	};
++};
++
++/* Remoteproc carveouts as relocated by the factory DTBO (fragments 101-108). */
++&cdsp_secure_heap {
++	reg = <0x0 0x80c00000 0x0 0x00600000>;
++};
++
++&video_mem {
++	reg = <0x0 0x83e00000 0x0 0x00700000>;
++};
++
++&adsp_mem {
++	reg = <0x0 0x84500000 0x0 0x03b00000>;
++};
++
++&slpi_mem {
++	reg = <0x0 0x88000000 0x0 0x01700000>;
++};
++
++&apps_rsc {
++	regulators-0 {
++		compatible = "qcom,pm8350-rpmh-regulators";
++		qcom,pmic-id = "b";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-s4-supply = <&vph_pwr>;
++		vdd-s5-supply = <&vph_pwr>;
++		vdd-s6-supply = <&vph_pwr>;
++		vdd-s7-supply = <&vph_pwr>;
++		vdd-s8-supply = <&vph_pwr>;
++		vdd-s9-supply = <&vph_pwr>;
++		vdd-s10-supply = <&vph_pwr>;
++		vdd-s11-supply = <&vph_pwr>;
++		vdd-s12-supply = <&vph_pwr>;
++
++		vdd-l2-l7-supply = <&vreg_bob>;
++		vdd-l3-l5-supply = <&vreg_bob>;
++		vdd-l6-l9-l11-supply = <&vreg_bob>;
++
++		/* USB3 QMP PHY PLL. */
++		vreg_l1b_0p91: ldo1 {
++			regulator-name = "vreg_l1b_0p91";
++			regulator-min-microvolt = <912000>;
++			regulator-max-microvolt = <920000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		/* USB2 PHY 3.3 V. */
++		vreg_l2b_3p07: ldo2 {
++			regulator-min-microvolt = <3072000>;
++			regulator-max-microvolt = <3072000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l5b_0p88: ldo5 {
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <888000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l6b_1p2: ldo6 {
++			regulator-name = "vreg_l6b_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l7b_2p5: ldo7 {
++			regulator-name = "vreg_l7b_2p5";
++			regulator-min-microvolt = <2504000>;
++			regulator-max-microvolt = <2504000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_s10b_1p8: smps10 {
++			regulator-name = "vreg_s10b_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++		};
++
++		vreg_s11b_0p95: smps11 {
++			regulator-name = "vreg_s11b_0p95";
++			regulator-min-microvolt = <966000>;
++			regulator-max-microvolt = <1104000>;
++		};
++
++		vreg_s12b_1p25: smps12 {
++			regulator-name = "vreg_s12b_1p25";
++			regulator-min-microvolt = <1350000>;
++			regulator-max-microvolt = <1400000>;
++		};
++
++		vreg_l9b_1p2: ldo9 {
++			regulator-name = "vreg_l9b_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
++
++	regulators-1 {
++		compatible = "qcom,pm8350c-rpmh-regulators";
++		qcom,pmic-id = "c";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-s4-supply = <&vph_pwr>;
++		vdd-s5-supply = <&vph_pwr>;
++		vdd-s6-supply = <&vph_pwr>;
++		vdd-s7-supply = <&vph_pwr>;
++		vdd-s8-supply = <&vph_pwr>;
++		vdd-s9-supply = <&vph_pwr>;
++		vdd-s10-supply = <&vph_pwr>;
++
++		vdd-l1-l12-supply = <&vreg_bob>;
++		vdd-l2-l8-supply = <&vreg_bob>;
++		vdd-l3-l4-l5-l7-l13-supply = <&vreg_bob>;
++		vdd-l6-l9-l11-supply = <&vreg_bob>;
++
++		vdd-bob-supply = <&vph_pwr>;
++
++		/* USB2 PHY 1.8 V. */
++		vreg_l1c_1p8: ldo1 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		/*
++		 * SLPI sensor_vdd (stock slpi_pas: pm8350c_l2, 1.8 V), switched
++		 * by &sensor_vdd_switch: mainline slpi-pas has no supply handling
++		 * and the sensor process dies on an I2C timeout without it.
++		 *
++		 * sensor_vddio (pm8350c L13C) is deliberately not declared: it is
++		 * also the panel's vci-supply, the bootloader leaves it on, and
++		 * letting the kernel take it over hangs the boot.
++		 */
++		vreg_l2c_1p8: ldo2 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++		};
++
++		vreg_s1c_1p86: smps1 {
++			regulator-name = "vreg_s1c_1p86";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <2024000>;
++		};
++
++		vreg_bob: bob {
++			regulator-min-microvolt = <3008000>;
++			regulator-max-microvolt = <3960000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
++		};
++	};
++
++	regulators-2 {
++		compatible = "qcom,pmr735a-rpmh-regulators";
++		qcom,pmic-id = "e";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-l7-bob-supply = <&vreg_bob>;
++
++		vreg_s2e_0p85: smps2 {
++			regulator-name = "vreg_s2e_0p85";
++			regulator-min-microvolt = <500000>;
++			regulator-max-microvolt = <1040000>;
++		};
++
++		/*
++		 * Wi-Fi antenna switch (stock cnss wlan-ant-switch-supply, 2.8 V
++		 * HPM). Nothing in ath11k/pwrseq consumes it; without it only
++		 * 2.4 GHz scans.
++		 */
++		vreg_l7e_2p8: ldo7 {
++			regulator-name = "vreg_l7e_2p8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-always-on;
++		};
++	};
++};
++
++/* Adreno 730; the zap shader is Samsung-signed (NON-HLOS a730_zap). */
++&gpu {
++	status = "okay";
++
++	zap-shader {
++		firmware-name = "qcom/sm8450/gts8wifi/a730_zap.mdt";
++	};
++};
++
++/*
++ * DisplayPort alternate mode: DP controller -> QMP PHY -> PS5169 ->
++ * connector, ended by the MAX77705 monitor's HPD bridge (always registered;
++ * without it the DP controller holds back the whole display). The 6.13 QMP
++ * combo PHY stays in USB3+DP mode, so DP gets two lanes (pin assignment D).
++ */
++&mdss_dp0 {
++	status = "okay";
++};
++
++&mdss_dp0_out {
++	data-lanes = <0 1>;
++};
++
++&usb_1 {
++	status = "okay";
++};
++
++/*
++ * USB-C, dual role; the MAX77705 monitor (charger@69) drives the role
++ * switch and the OTG boost.
++ * - Stock maps the DWC3 core as 0xd93c bytes; the dtsi's 0xcd00 stops short
++ *   of LLUCTL (0xd024), which dwc3_core_init() writes on DWC31 cores at
++ *   SuperSpeed.
++ * - Stock's U3 PHY-suspend and U1/U2 quirks: without them only the first
++ *   attach per boot enumerates.
++ */
++&usb_1_dwc3 {
++	reg = <0 0x0a600000 0 0xd93c>;
++	snps,dis_u3_susphy_quirk;
++	snps,dis-u1-entry-quirk;
++	snps,dis-u2-entry-quirk;
++	dr_mode = "otg";
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
++	maximum-speed = "super-speed";
++	phys = <&usb_1_hsphy>, <&usb_1_qmpphy QMP_USB43DP_USB3_PHY>;
++	phy-names = "usb2-phy", "usb3-phy";
++};
++
++&usb_1_dwc3_hs {
++	remote-endpoint = <&max77705_con_hs>;
++};
++
++&usb_1_hsphy {
++	vdda-pll-supply = <&vreg_l5b_0p88>;
++	vdda18-supply = <&vreg_l1c_1p8>;
++	vdda33-supply = <&vreg_l2b_3p07>;
++	status = "okay";
++};
++
++&usb_1_qmpphy {
++	vdda-phy-supply = <&vreg_l6b_1p2>;
++	vdda-pll-supply = <&vreg_l1b_0p91>;
++	status = "okay";
++};
++
++&usb_1_qmpphy_out {
++	remote-endpoint = <&ps5169_phy_ss>;
++};
++
++/*
++ * PS5169 USB3/DP redriver between the connector and the QMP PHY. The
++ * MAX77705 monitor sets orientation (from CCPinStat) and lane mode; the
++ * redriver flips its lanes and forwards the orientation to the PHY, which
++ * must flip too (stock uses gpio91 port select for that).
++ */
++&i2c12 {
++	status = "okay";
++
++	redriver@28 {
++		compatible = "parade,ps5169";
++		reg = <0x28>;
++		orientation-switch;
++		mode-switch;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++
++				ps5169_con_ss: endpoint {
++					remote-endpoint = <&max77705_con_ss>;
++				};
++			};
++
++			port@1 {
++				reg = <1>;
++
++				ps5169_phy_ss: endpoint {
++					remote-endpoint = <&usb_1_qmpphy_out>;
++				};
++			};
++		};
++	};
++};
++
++&ufs_mem_hc {
++	status = "okay";
++
++	vcc-supply = <&vreg_l7b_2p5>;
++	vcc-max-microamp = <1100000>;
++	vccq-supply = <&vreg_l9b_1p2>;
++	vccq-max-microamp = <1200000>;
++	vdd-hba-supply = <&vreg_l9b_1p2>;
++};
++
++&ufs_mem_phy {
++	status = "okay";
++
++	vdda-phy-supply = <&vreg_l5b_0p88>;
++	vdda-pll-supply = <&vreg_l6b_1p2>;
++};
++
++&tlmm {
++	/*
++	 * GPIOs 36-39 are owned by TrustZone (stock qcom,gpios-reserved). An AP
++	 * read of their control registers, which gpiolib does for every line
++	 * at registration, stalls the NoC and the watchdog resets the device.
++	 */
++	gpio-reserved-ranges = <36 4>;
++
++	bt_en: bt-en-state {
++		pins = "gpio81";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-pull-down;
++	};
++
++	wlan_en: wlan-en-state {
++		pins = "gpio80";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-pull-down;
++	};
++
++	xo_clk_default: xo-clk-state {
++		pins = "gpio204";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-pull-down;
++	};
++
++	/* Stock nt36523_attn_irq: input, no pull. */
++	ts_irq_default: ts-irq-default-state {
++		pins = "gpio46";
++		function = "gpio";
++		bias-disable;
++	};
++
++	/* The four CS35L45 share reset (gpio18) and interrupt (gpio19). */
++	cs35l45_gpio_default: cs35l45-gpio-default-state {
++		pins = "gpio18", "gpio19";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/*
++	 * Primary MI2S to the amplifiers (stock pri_tdm_*_active). Samsung
++	 * runs a 4-slot TDM bus; AudioReach here only has I2S, so the amps
++	 * pair up on the two I2S channels.
++	 */
++	pri_mi2s_active: pri-mi2s-active-state {
++		clk-pins {
++			pins = "gpio126";
++			function = "mi2s0_sck";
++			drive-strength = <8>;
++			bias-disable;
++			output-high;
++		};
++
++		ws-pins {
++			pins = "gpio129";
++			function = "mi2s0_ws";
++			drive-strength = <8>;
++			bias-disable;
++			output-high;
++		};
++
++		din-pins {
++			pins = "gpio127";
++			function = "mi2s0_data0";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		dout-pins {
++			pins = "gpio128";
++			function = "mi2s0_data1";
++			drive-strength = <8>;
++			bias-disable;
++		};
++	};
++
++	/* Stock epen-int-active / epen-pdct-active: inputs, no pull. */
++	wacom_irq_default: wacom-irq-default-state {
++		pins = "gpio51";
++		function = "gpio";
++		bias-disable;
++		input-enable;
++	};
++
++	wacom_pdct_default: wacom-pdct-default-state {
++		pins = "gpio155";
++		function = "gpio";
++		bias-disable;
++		input-enable;
++	};
++
++	wacom_i2c_gpio: wacom-i2c-gpio-state {
++		pins = "gpio52", "gpio53";
++		function = "gpio";
++		bias-pull-up;
++		drive-strength = <2>;
++	};
++};
++
++/* Stock tsp_i2c_active: 2 mA, no pull (the panel side has the pull-ups). */
++&qup_i2c8_data_clk {
++	drive-strength = <2>;
++	bias-disable;
++};
++
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&gpi_dma0 {
++	status = "okay";
++};
++
++&i2c5 {
++	status = "okay";
++
++	/* MAX77705 companion PMIC: charger, USB-C/PD, fuel gauge. */
++	max77705_usb: charger@69 {
++		compatible = "maxim,max77705-charger-monitor";
++		reg = <0x69>;
++		io-channels = <&pmk8350_vadc 0x145>,
++			      <&pmk8350_vadc 0x146>,
++			      <&pmk8350_vadc 0x148>;
++		io-channel-names = "battery", "blanket", "charger";
++		/*
++		 * Switching-charger current in the normal temperature band.
++		 * Measured: steady 1.49 A with all NTCs plateaued 5.5 C below
++		 * the WARM zone. Stock's own maximum is 3150000.
++		 */
++		samsung,normal-band-charge-current-microamp = <1500000>;
++
++		connector {
++			compatible = "usb-c-connector";
++			label = "USB-C";
++			power-role = "dual";
++			data-role = "dual";
++			try-power-role = "sink";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++
++				port@0 {
++					reg = <0>;
++
++					max77705_con_hs: endpoint {
++						remote-endpoint = <&usb_1_dwc3_hs>;
++					};
++				};
++
++				port@1 {
++					reg = <1>;
++
++					max77705_con_ss: endpoint {
++						remote-endpoint = <&ps5169_con_ss>;
++					};
++				};
++
++				port@2 {
++					reg = <2>;
++
++					max77705_con_sbu: endpoint {
++						remote-endpoint = <&sbu_mux_con>;
++					};
++				};
++			};
++		};
++	};
++
++	battery@36 {
++		compatible = "maxim,max77705-battery";
++		reg = <0x36>;
++		/* Stock fg_resistor = 5 means 2 milliohms. */
++		maxim,rsns-microohm = <2000>;
++		/* Stock battery,chg_float_voltage; reporting threshold only. */
++		maxim,over-volt = <4380>;
++		power-supplies = <&max77705_usb>;
++	};
++};
++
++/*
++ * Four Cirrus CS35L45 speaker amplifiers (the WSA883x nodes in sm8450.dtsi
++ * are unused on this board): 0x30 rear-left, 0x31 front-left, 0x32
++ * rear-right, 0x33 front-right. Stock VA/VP supplies are dummies. No
++ * speaker-protection firmware is loaded, so the UCM profile caps volume.
++ */
++&i2c4 {
++	clock-frequency = <1000000>;
++	status = "okay";
++
++	cs35l45_rl: amplifier@30 {
++		compatible = "cirrus,cs35l45";
++		reg = <0x30>;
++		#sound-dai-cells = <1>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 18 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cs35l45_gpio_default>;
++		sound-name-prefix = "Rear Left";
++		cirrus,asp-sdout-hiz-ctrl = <3>;
++
++		cirrus,gpio-ctrl1 {
++			gpio-ctrl = <2>;
++		};
++
++		cirrus,gpio-ctrl2 {
++			gpio-ctrl = <2>;
++		};
++	};
++
++	cs35l45_fl: amplifier@31 {
++		compatible = "cirrus,cs35l45";
++		reg = <0x31>;
++		#sound-dai-cells = <1>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 18 GPIO_ACTIVE_HIGH>;
++		sound-name-prefix = "Front Left";
++		cirrus,asp-sdout-hiz-ctrl = <3>;
++
++		cirrus,gpio-ctrl1 {
++			gpio-ctrl = <2>;
++		};
++
++		cirrus,gpio-ctrl2 {
++			gpio-ctrl = <2>;
++		};
++	};
++
++	cs35l45_rr: amplifier@32 {
++		compatible = "cirrus,cs35l45";
++		reg = <0x32>;
++		#sound-dai-cells = <1>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 18 GPIO_ACTIVE_HIGH>;
++		sound-name-prefix = "Rear Right";
++		cirrus,asp-sdout-hiz-ctrl = <3>;
++
++		cirrus,gpio-ctrl1 {
++			gpio-ctrl = <2>;
++		};
++
++		cirrus,gpio-ctrl2 {
++			gpio-ctrl = <2>;
++		};
++	};
++
++	cs35l45_fr: amplifier@33 {
++		compatible = "cirrus,cs35l45";
++		reg = <0x33>;
++		#sound-dai-cells = <1>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 18 GPIO_ACTIVE_HIGH>;
++		sound-name-prefix = "Front Right";
++		cirrus,asp-sdout-hiz-ctrl = <3>;
++
++		cirrus,gpio-ctrl1 {
++			gpio-ctrl = <2>;
++		};
++
++		cirrus,gpio-ctrl2 {
++			gpio-ctrl = <2>;
++		};
++	};
++};
++
++&qupv3_id_1 {
++	status = "okay";
++};
++
++&gpi_dma1 {
++	status = "okay";
++};
++
++/*
++ * NT36523 TDDI touch. Samsung's DT says 0x62 (the bootloader address); the
++ * running firmware answers at 0x01. No reset or supply: the controller is
++ * the panel DDIC.
++ */
++&i2c8 {
++	status = "okay";
++
++	touchscreen@1 {
++		compatible = "novatek,nt36523-ts";
++		reg = <0x01>;
++		interrupts-extended = <&tlmm 46 IRQ_TYPE_EDGE_FALLING>;
++		pinctrl-0 = <&ts_irq_default>;
++		pinctrl-names = "default";
++	};
++};
++
++/* SM5440 direct (charge-pump) charger. */
++&i2c1 {
++	status = "okay";
++
++	sm5440: charger@63 {
++		compatible = "siliconmitus,sm5440";
++		reg = <0x63>;
++	};
++};
++
++/*
++ * Battery, blanket and charger NTCs. Raw codes are exported for Samsung's
++ * NTC tables; the generic processed temperatures are not used.
++ */
++&pmk8350_vadc {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&charger_ntc_default>;
++
++	battery-thermistor@145 {
++		reg = <0x145>;
++		label = "battery_ntc";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++	};
++
++	blanket-thermistor@146 {
++		reg = <0x146>;
++		label = "blanket_ntc";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++	};
++
++	charger-thermistor@148 {
++		reg = <0x148>;
++		label = "charger_ntc";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++	};
++};
++
++&pm8350_gpios {
++	/* Stock key_vol_up_default: input, pull-up, 1.8 V. */
++	key_vol_up_default: key-vol-up-default-state {
++		pins = "gpio6";
++		function = "normal";
++		input-enable;
++		bias-pull-up;
++		power-source = <1>;
++	};
++
++	charger_ntc_default: charger-ntc-state {
++		pins = "gpio1";
++		function = "normal";
++		bias-high-impedance;
++	};
++};
++
++/* Debug UART (needs a jig); getty is not spawned without console=ttyMSM0. */
++&uart7 {
++	status = "okay";
++};
++
++&pon_pwrkey {
++	status = "okay";
++};
++
++/* Timed wake from suspend (rtcwake). */
++&pmk8350_rtc {
++	status = "okay";
++};
++
++&pon_resin {
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++/*
++ * Panel: CSOT PPA957DB1, NT36523 TDDI, dual-DSI C-PHY 3-lane video mode,
++ * 1600x2560@120, no DSC. The bootloader passes lcd_id 47F243 for it. The
++ * other factory option (Tianma TL109BVMS2) needs a different init sequence
++ * and is not supported by this DTS.
++ */
++&mdss {
++	status = "okay";
++};
++
++&mdss_dsi0 {
++	vdda-supply = <&vreg_l6b_1p2>;
++	qcom,dual-dsi-mode;
++	qcom,sync-dual-dsi;
++	qcom,master-dsi;
++	status = "okay";
++
++	panel: panel@0 {
++		compatible = "samsung,gts8-csot-nt36523";
++		reg = <0>;
++
++		vddio-supply = <&panel_ldo>;
++		/*
++		 * Samsung drives an active-high "panel_reset" regulator 1/0/1;
++		 * nt36523_reset() makes the same waveform from an active-low
++		 * GPIO.
++		 */
++		reset-gpios = <&tlmm 0 GPIO_ACTIVE_LOW>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++
++				panel_in_0: endpoint {
++					remote-endpoint = <&mdss_dsi0_out>;
++				};
++			};
++
++			port@1 {
++				reg = <1>;
++
++				panel_in_1: endpoint {
++					remote-endpoint = <&mdss_dsi1_out>;
++				};
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	data-lanes = <0 1 2>;
++	remote-endpoint = <&panel_in_0>;
++};
++
++&mdss_dsi0_phy {
++	vdds-supply = <&vreg_l5b_0p88>;
++	phy-type = <PHY_TYPE_CPHY>;
++	status = "okay";
++};
++
++&mdss_dsi1 {
++	vdda-supply = <&vreg_l6b_1p2>;
++	qcom,dual-dsi-mode;
++	qcom,sync-dual-dsi;
++	/* DSI1 is the slave link and runs off DSI0's PHY clocks. */
++	assigned-clock-parents = <&mdss_dsi0_phy 0>, <&mdss_dsi0_phy 1>;
++	status = "okay";
++};
++
++&mdss_dsi1_out {
++	data-lanes = <0 1 2>;
++	remote-endpoint = <&panel_in_1>;
++};
++
++&mdss_dsi1_phy {
++	vdds-supply = <&vreg_l5b_0p88>;
++	phy-type = <PHY_TYPE_CPHY>;
++	status = "okay";
++};
++
++/* WCN6855 Wi-Fi. */
++&pcie0 {
++	status = "okay";
++	max-link-speed = <2>;
++};
++
++&pcie0_phy {
++	status = "okay";
++	vdda-phy-supply = <&vreg_l5b_0p88>;
++	vdda-pll-supply = <&vreg_l6b_1p2>;
++};
++
++&pcieport0 {
++	wifi@0 {
++		compatible = "pci17cb,1103";
++		reg = <0x10000 0x0 0x0 0x0 0x0>;
++
++		vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
++		vddaon-supply = <&vreg_pmu_aon_0p8>;
++		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
++		vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
++		vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
++		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
++		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
++		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
++		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
++	};
++};
++
++/* WCN6855 Bluetooth on stock hsuart0 (QUP SE20, GPIOs 76-79). */
++&qupv3_id_2 {
++	status = "okay";
++};
++
++&uart20 {
++	status = "okay";
++
++	bluetooth {
++		compatible = "qcom,wcn6855-bt";
++
++		vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
++		vddaon-supply = <&vreg_pmu_aon_0p8>;
++		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
++		vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
++		vddbtcmx-supply = <&vreg_pmu_btcmx_0p8>;
++		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
++		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
++		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
++	};
++};
++
++/* Sensor DSP (LSM6DSO accel/gyro, AK0991x mag); Samsung-signed image. */
++&remoteproc_slpi {
++	firmware-name = "qcom/sm8450/gts8wifi/slpi.mdt";
++	status = "okay";
++};
++
++/* Audio DSP; Samsung-signed image. */
++&remoteproc_adsp {
++	firmware-name = "qcom/sm8450/gts8wifi/adsp.mdt";
++	status = "okay";
++};
++
++/*
++ * Digital mics into the LPASS VA macro (no WCD codec, no analog jack).
++ * Stock cdc-dmic01/23/45 use LPI gpio6/7, 8/9 and 12/13. Capture currently
++ * records silence, as on the Tab S8+.
++ */
++&lpass_tlmm {
++	dmic45_default: dmic45-default-state {
++		clk-pins {
++			pins = "gpio12";
++			function = "dmic3_clk";
++			drive-strength = <8>;
++			output-high;
++		};
++
++		data-pins {
++			pins = "gpio13";
++			function = "dmic3_data";
++			drive-strength = <8>;
++			input-enable;
++		};
++	};
++};
++
++&vamacro {
++	pinctrl-0 = <&dmic01_default>, <&dmic23_default>, <&dmic45_default>;
++	pinctrl-names = "default";
++	vdd-micb-supply = <&vreg_s10b_1p8>;
++	qcom,dmic-sample-rate = <2400000>;
++	status = "okay";
++};
++
++/*
++ * The model selects the AudioReach topology
++ * qcom/sm8450/Samsung-Galaxy-Tab-S8-tplg.bin: the SM8450-HDK topology with
++ * the I2S data line switched from SD0 to SD1 (gpio128/data1 carries the
++ * speaker data), see boot/tools/mk-tplg.py.
++ */
++&sound {
++	compatible = "qcom,sm8450-sndcard";
++	model = "Samsung-Galaxy-Tab-S8";
++	pinctrl-names = "default";
++	pinctrl-0 = <&pri_mi2s_active>;
++
++	speaker-playback-dai-link {
++		link-name = "CS35L45 Speaker Playback";
++
++		cpu {
++			sound-dai = <&q6apmbedai PRIMARY_MI2S_RX>;
++		};
++
++		codec {
++			sound-dai = <&cs35l45_fl 0>, <&cs35l45_fr 0>,
++				    <&cs35l45_rl 0>, <&cs35l45_rr 0>;
++		};
++
++		platform {
++			sound-dai = <&q6apm>;
++		};
++	};
++
++	va-capture-dai-link {
++		link-name = "Internal DMIC Capture";
++
++		cpu {
++			sound-dai = <&q6apmbedai VA_CODEC_DMA_TX_0>;
++		};
++
++		codec {
++			sound-dai = <&vamacro 0>;
++		};
++
++		platform {
++			sound-dai = <&q6apm>;
++		};
++	};
++};

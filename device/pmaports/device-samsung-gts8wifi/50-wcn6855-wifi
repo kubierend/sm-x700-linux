@@ -1,0 +1,44 @@
+#!/bin/sh
+# systemd-sleep hook for the Galaxy Tab S8 (SM-X700) WCN6855 Wi-Fi.
+#
+# ath11k suspends WCN6855 by entering WoW + MHI M3 and expects the chip to
+# keep that state. On this tablet (Samsung HSP.2.0 firmware, sm8450) the chip
+# is found in MHI SYS_ERR on resume, both for s2idle and deep, and wlan0 stays
+# dead until reboot. Unload the PCI driver before sleep (clean MHI power down
+# while the chip is still healthy) and reload it afterwards (fresh firmware
+# boot). This is the same thing upstream ath11k later does in-kernel for such
+# platforms (default PM policy: power down on suspend).
+#
+# WARNING: never rmmod ath11k_pci on an already wedged chip (SYS_ERR / WMI
+# timeouts): that hard-hung the tablet (twice). A wedged chip never recovers
+# without a reboot, so the pre hook skips the unload if ANY ath11k/MHI failure
+# was logged since boot, or if wlan0 is missing.
+#
+# Install: /usr/lib/systemd/system-sleep/50-wcn6855-wifi (mode 0755)
+
+state=/run/wcn6855-sleep-unloaded
+log() { echo "wcn6855-sleep: $*" > /dev/kmsg 2>/dev/null; echo "wcn6855-sleep: $*"; }
+
+case "$1" in
+pre)
+	rm -f "$state"
+	grep -q '^ath11k_pci ' /proc/modules || exit 0
+	# Only look at messages since our last reload (fresh firmware boot):
+	# our own rmmod logs "firmware crashed: MHI_CB_EE_RDDM", which must not
+	# block the next unload.
+	if [ ! -e /sys/class/net/wlan0 ] || dmesg | awk '/wcn6855-sleep: reloading/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' | grep -q -E \
+	   'ath11k.*(timeout|failed to resume|firmware crashed)|mhi.*(SYS ERROR|non M3|Did not enter M0)|mhi_qrtr.*failed'; then
+		log "ath11k looks wedged, not unloading (reboot to recover Wi-Fi)"
+		exit 0
+	fi
+	log "unloading ath11k_pci before $2"
+	rmmod ath11k_pci && touch "$state"
+	;;
+post)
+	[ -e "$state" ] || exit 0
+	rm -f "$state"
+	log "reloading ath11k_pci after $2"
+	modprobe ath11k_pci
+	;;
+esac
+exit 0

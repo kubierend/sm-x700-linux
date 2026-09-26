@@ -1,0 +1,170 @@
+pinctrl: qcom: lpass-lpi: runtime PM for the LPASS clock votes
+
+--- a/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c
++++ b/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c
+@@ -10,6 +10,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ #include <linux/seq_file.h>
+ 
+ #include <linux/pinctrl/pinconf-generic.h>
+@@ -38,16 +39,49 @@
+ 	const struct lpi_pinctrl_variant_data *data;
+ };
+ 
++/*
++ * The LPI TLMM is only clocked while its LPASS core/audio votes are held, and those
++ * votes keep the ADSP voting CX on (AUDIO DRV), which blocks SoC sleep. Hold them only
++ * around register access. An unclocked access hangs the bus, so a failed resume
++ * skips the access instead.
++ */
++static int lpi_pm_get(struct lpi_pinctrl *state)
++{
++	int ret = pm_runtime_resume_and_get(state->dev);
++
++	if (ret)
++		dev_err_ratelimited(state->dev, "runtime resume failed: %d\n", ret);
++	return ret;
++}
++
++static void lpi_pm_put(struct lpi_pinctrl *state)
++{
++	pm_runtime_mark_last_busy(state->dev);
++	pm_runtime_put_autosuspend(state->dev);
++}
++
+ static int lpi_gpio_read(struct lpi_pinctrl *state, unsigned int pin,
+ 			 unsigned int addr)
+ {
+-	return ioread32(state->tlmm_base + LPI_TLMM_REG_OFFSET * pin + addr);
++	int val;
++
++	if (lpi_pm_get(state))
++		return 0;
++	val = ioread32(state->tlmm_base + LPI_TLMM_REG_OFFSET * pin + addr);
++	lpi_pm_put(state);
++
++	return val;
+ }
+ 
+ static int lpi_gpio_write(struct lpi_pinctrl *state, unsigned int pin,
+ 			  unsigned int addr, unsigned int val)
+ {
++	int ret = lpi_pm_get(state);
++
++	if (ret)
++		return ret;
+ 	iowrite32(val, state->tlmm_base + LPI_TLMM_REG_OFFSET * pin + addr);
++	lpi_pm_put(state);
+ 
+ 	return 0;
+ }
+@@ -209,6 +243,8 @@
+ 	else
+ 		reg = pctrl->slew_base + LPI_SLEW_RATE_CTL_REG;
+ 
++	if (lpi_pm_get(pctrl))
++		return -EIO;
+ 	mutex_lock(&pctrl->lock);
+ 
+ 	sval = ioread32(reg);
+@@ -217,6 +253,7 @@
+ 	iowrite32(sval, reg);
+ 
+ 	mutex_unlock(&pctrl->lock);
++	lpi_pm_put(pctrl);
+ 
+ 	return 0;
+ }
+@@ -484,7 +521,8 @@
+ 	pctrl->chip.base = -1;
+ 	pctrl->chip.ngpio = data->npins;
+ 	pctrl->chip.label = dev_name(dev);
+-	pctrl->chip.can_sleep = false;
++	/* Register access may resume the device (DSP clock votes). */
++	pctrl->chip.can_sleep = true;
+ 
+ 	mutex_init(&pctrl->lock);
+ 
+@@ -505,6 +543,14 @@
+ 		goto err_pinctrl;
+ 	}
+ 
++	/* Clocks are on from above: start active and let autosuspend drop them. */
++	pm_runtime_set_autosuspend_delay(dev, 100);
++	pm_runtime_use_autosuspend(dev);
++	pm_runtime_set_active(dev);
++	pm_runtime_mark_last_busy(dev);
++	pm_runtime_enable(dev);
++	pm_runtime_idle(dev);
++
+ 	return 0;
+ 
+ err_pinctrl:
+@@ -520,13 +566,36 @@
+ 	struct lpi_pinctrl *pctrl = platform_get_drvdata(pdev);
+ 	int i;
+ 
++	pm_runtime_disable(&pdev->dev);
+ 	mutex_destroy(&pctrl->lock);
+-	clk_bulk_disable_unprepare(MAX_LPI_NUM_CLKS, pctrl->clks);
++	if (!pm_runtime_status_suspended(&pdev->dev))
++		clk_bulk_disable_unprepare(MAX_LPI_NUM_CLKS, pctrl->clks);
++	pm_runtime_set_suspended(&pdev->dev);
+ 
+ 	for (i = 0; i < pctrl->data->npins; i++)
+ 		pinctrl_generic_remove_group(pctrl->ctrl, i);
+ }
+ EXPORT_SYMBOL_GPL(lpi_pinctrl_remove);
+ 
++static int lpi_pinctrl_runtime_suspend(struct device *dev)
++{
++	struct lpi_pinctrl *pctrl = dev_get_drvdata(dev);
++
++	clk_bulk_disable_unprepare(MAX_LPI_NUM_CLKS, pctrl->clks);
++	return 0;
++}
++
++static int lpi_pinctrl_runtime_resume(struct device *dev)
++{
++	struct lpi_pinctrl *pctrl = dev_get_drvdata(dev);
++
++	return clk_bulk_prepare_enable(MAX_LPI_NUM_CLKS, pctrl->clks);
++}
++
++const struct dev_pm_ops lpi_pinctrl_pm_ops = {
++	RUNTIME_PM_OPS(lpi_pinctrl_runtime_suspend, lpi_pinctrl_runtime_resume, NULL)
++};
++EXPORT_SYMBOL_GPL(lpi_pinctrl_pm_ops);
++
+ MODULE_DESCRIPTION("QTI LPI GPIO pin control driver");
+ MODULE_LICENSE("GPL");
+--- a/drivers/pinctrl/qcom/pinctrl-lpass-lpi.h
++++ b/drivers/pinctrl/qcom/pinctrl-lpass-lpi.h
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/array_size.h>
+ #include <linux/bits.h>
++#include <linux/pm.h>
+ 
+ #include "../core.h"
+ 
+@@ -89,5 +90,6 @@
+ 
+ int lpi_pinctrl_probe(struct platform_device *pdev);
+ void lpi_pinctrl_remove(struct platform_device *pdev);
++extern const struct dev_pm_ops lpi_pinctrl_pm_ops;
+ 
+ #endif /*__PINCTRL_LPASS_LPI_H__*/
+--- a/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c
++++ b/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c
+@@ -206,6 +206,7 @@
+ 	.driver = {
+ 		   .name = "qcom-sm8450-lpass-lpi-pinctrl",
+ 		   .of_match_table = lpi_pinctrl_of_match,
++		   .pm = pm_ptr(&lpi_pinctrl_pm_ops),
+ 	},
+ 	.probe = lpi_pinctrl_probe,
+ 	.remove = lpi_pinctrl_remove,

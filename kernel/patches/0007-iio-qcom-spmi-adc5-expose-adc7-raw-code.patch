@@ -1,0 +1,31 @@
+iio: adc: qcom-spmi-adc5: expose the ADC7 raw code
+
+--- a/drivers/iio/adc/qcom-spmi-adc5.c
++++ b/drivers/iio/adc/qcom-spmi-adc5.c
+@@ -444,6 +444,14 @@
+ 	prop = &adc->chan_props[chan->address];
+ 
+ 	switch (mask) {
++	case IIO_CHAN_INFO_RAW:
++		if (do_conv != adc7_do_conversion)
++			return -EINVAL;
++		ret = do_conv(adc, prop, chan, &adc_code_volt, &adc_code_cur);
++		if (ret)
++			return ret;
++		*val = adc_code_volt;
++		return IIO_VAL_INT;
+ 	case IIO_CHAN_INFO_PROCESSED:
+ 		ret = do_conv(adc, prop, chan,
+ 					&adc_code_volt, &adc_code_cur);
+@@ -862,6 +870,11 @@
+ 		iio_chan->datasheet_name = adc_chan->datasheet_name;
+ 		iio_chan->extend_name = prop.channel_name;
+ 		iio_chan->info_mask_separate = adc_chan->info_mask;
++		/* Preserve calibrated ADC7 codes for board-specific NTC tables.
++		 * The generic thermistor conversion need not match the fitted NTC.
++		 */
++		if (adc->data->info == &adc7_info)
++			iio_chan->info_mask_separate |= BIT(IIO_CHAN_INFO_RAW);
+ 		iio_chan->type = adc_chan->type;
+ 		iio_chan->address = index;
+ 		iio_chan++;

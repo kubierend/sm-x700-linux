@@ -1,0 +1,412 @@
+usb: typec: mux: add the Parade PS5169 USB3/DP redriver
+
+--- a/drivers/usb/typec/mux/Kconfig
++++ b/drivers/usb/typec/mux/Kconfig
+@@ -46,6 +46,15 @@
+ 	  on a common USB Type-C connector.
+ 	  If compiled as a module, the module will be named it5205.
+ 
++config TYPEC_MUX_PS5169
++	tristate "Parade PS5169 Type-C redriver driver"
++	depends on I2C
++	depends on DRM || DRM=n
++	select DRM_AUX_BRIDGE if DRM_BRIDGE && OF
++	help
++	  Say Y or M if your system has a Parade PS5169 USB3/DisplayPort
++	  Type-C linear redriver (Samsung Galaxy Tab S8).
++
+ config TYPEC_MUX_NB7VPQ904M
+ 	tristate "On Semiconductor NB7VPQ904M Type-C redriver driver"
+ 	depends on I2C
+--- a/drivers/usb/typec/mux/Makefile
++++ b/drivers/usb/typec/mux/Makefile
+@@ -6,6 +6,7 @@
+ obj-$(CONFIG_TYPEC_MUX_INTEL_PMC)	+= intel_pmc_mux.o
+ obj-$(CONFIG_TYPEC_MUX_IT5205)		+= it5205.o
+ obj-$(CONFIG_TYPEC_MUX_NB7VPQ904M)	+= nb7vpq904m.o
++obj-$(CONFIG_TYPEC_MUX_PS5169)		+= ps5169.o
+ obj-$(CONFIG_TYPEC_MUX_PTN36502)	+= ptn36502.o
+ obj-$(CONFIG_TYPEC_MUX_TUSB1046)	+= tusb1046.o
+ obj-$(CONFIG_TYPEC_MUX_WCD939X_USBSS)	+= wcd939x-usbss.o
+--- /dev/null
++++ b/drivers/usb/typec/mux/ps5169.c
+@@ -0,0 +1,379 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Parade PS5169 USB3/DisplayPort Type-C linear redriver.
++ *
++ * Register values and sequences follow Samsung's GPL driver for the Galaxy
++ * Tab S8 (drivers/redriver/ps5169/ps5169.c): register 0x40 selects the lane
++ * configuration and plug side, 0xa0/0xa1 the DP path, 0x04 the USB data
++ * direction, 0x8d/0x90 the USB RX termination and 0x52/0x5e the DP EQ.
++ *
++ * Sits between the Type-C connector (port@0) and the QMP combo PHY
++ * (port@1): orientation and mode are applied here and forwarded to the PHY,
++ * and a DRM aux bridge keeps the DP bridge chain connected through us.
++ */
++#include <drm/bridge/aux-bridge.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/usb/typec_altmode.h>
++#include <linux/usb/typec_dp.h>
++#include <linux/usb/typec_mux.h>
++
++#define PS5169_REG_USB_DIR	0x04
++#define PS5169_REG_CONFIG	0x40
++#define PS5169_REG_EQ0		0x52
++#define PS5169_REG_EQ1		0x5e
++#define PS5169_REG_RX_TERM1	0x8d
++#define PS5169_REG_RX_TERM2	0x90
++#define PS5169_REG_RESET	0x9d
++#define PS5169_REG_DP_PATH	0xa0
++#define PS5169_REG_DP_LANES	0xa1
++#define PS5169_REG_CHIP_ID2	0xac
++#define PS5169_REG_CHIP_ID1	0xad
++
++#define PS5169_CHIP_ID1		0x69
++#define PS5169_CHIP_ID2		0x87
++
++/* Register 0x40: bit 4 selects the flipped (rear) side. */
++#define PS5169_CFG_OFF		0x80
++#define PS5169_CFG_DP4		0xa0
++#define PS5169_CFG_USB		0xc0
++#define PS5169_CFG_DP2_USB	0xe0
++#define PS5169_CFG_FLIP		0x10
++
++/*
++ * Plug orientation is forwarded to the QMP PHY as well: like stock (redriver
++ * flip bit plus the PHY's port select), both have to flip for the reversed
++ * plug to reach SuperSpeed (verified on SM-X700, 2026-09-25). Kept as a
++ * parameter for bring-up on other boards.
++ */
++static bool phy_follow = true;
++module_param(phy_follow, bool, 0644);
++MODULE_PARM_DESC(phy_follow, "Forward plug orientation to the USB3/DP PHY");
++
++#define PS5169_EQ0_DEFAULT	0x20
++#define PS5169_EQ1_DEFAULT	0x06
++
++enum ps5169_mode {
++	PS5169_OFF,
++	PS5169_USB,
++	PS5169_DP4,
++	PS5169_DP2_USB,
++};
++
++static const char * const ps5169_mode_names[] = {
++	[PS5169_OFF] = "off",
++	[PS5169_USB] = "usb3",
++	[PS5169_DP4] = "dp4",
++	[PS5169_DP2_USB] = "dp2+usb3",
++};
++
++struct ps5169 {
++	struct i2c_client *client;
++	struct typec_switch_dev *sw;
++	struct typec_mux_dev *mux;
++	struct typec_switch *typec_switch;
++	struct typec_mux *typec_mux;
++	struct mutex lock; /* orientation, mode and the chip registers */
++	enum typec_orientation orientation;
++	unsigned long state;
++	enum ps5169_mode applied;
++	bool applied_flip;
++};
++
++struct ps5169_reg {
++	u8 reg;
++	u8 val;
++};
++
++/* Samsung's ps5169_set_work_mode() after the 0x9d reset pulse, with its
++ * default tuning (ps5619,reg_5x properties are absent on this device).
++ */
++static const struct ps5169_reg ps5169_init_seq[] = {
++	{ 0x40, 0x80 }, { 0xa0, 0x02 }, { 0x51, 0x40 }, { 0x50, 0x20 },
++	{ 0x54, 0x00 }, { 0x5d, 0x44 }, { 0x55, 0x00 }, { 0x56, 0x00 },
++	{ 0x57, 0x00 }, { 0x58, 0x00 }, { 0x59, 0x00 }, { 0x5a, 0x00 },
++	{ 0x5b, 0x00 }, { 0x5f, 0x00 }, { 0x60, 0x00 }, { 0x61, 0x03 },
++	{ 0x65, 0x40 }, { 0x66, 0x00 }, { 0x67, 0x03 },
++	{ PS5169_REG_EQ0, PS5169_EQ0_DEFAULT }, { PS5169_REG_EQ1, PS5169_EQ1_DEFAULT },
++	{ PS5169_REG_USB_DIR, 0x00 },
++};
++
++static int ps5169_write(struct ps5169 *ps, u8 reg, u8 val)
++{
++	int ret = i2c_smbus_write_byte_data(ps->client, reg, val);
++
++	if (ret)
++		dev_err(&ps->client->dev, "write 0x%02x=0x%02x failed: %d\n", reg, val, ret);
++	return ret;
++}
++
++static int ps5169_write_seq(struct ps5169 *ps, const struct ps5169_reg *seq, size_t n)
++{
++	int ret;
++
++	for (; n; n--, seq++) {
++		ret = ps5169_write(ps, seq->reg, seq->val);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static enum ps5169_mode ps5169_wanted(struct ps5169 *ps)
++{
++	if (ps->orientation == TYPEC_ORIENTATION_NONE)
++		return PS5169_OFF;
++
++	switch (ps->state) {
++	case TYPEC_STATE_USB:
++		return PS5169_USB;
++	case TYPEC_DP_STATE_C:
++	case TYPEC_DP_STATE_E:
++		return PS5169_DP4;
++	case TYPEC_DP_STATE_D:
++		return PS5169_DP2_USB;
++	default:
++		return PS5169_OFF;
++	}
++}
++
++static int ps5169_apply(struct ps5169 *ps)
++{
++	enum ps5169_mode mode = ps5169_wanted(ps);
++	bool flip = ps->orientation == TYPEC_ORIENTATION_REVERSE;
++	u8 cfg = flip ? PS5169_CFG_FLIP : 0;
++	int ret;
++
++	if (mode == ps->applied && (mode == PS5169_OFF || flip == ps->applied_flip))
++		return 0;
++
++	switch (mode) {
++	case PS5169_OFF: {
++		const struct ps5169_reg seq[] = {
++			{ PS5169_REG_EQ0, PS5169_EQ0_DEFAULT },
++			{ PS5169_REG_EQ1, PS5169_EQ1_DEFAULT },
++			{ PS5169_REG_CONFIG, PS5169_CFG_OFF },
++			{ PS5169_REG_DP_PATH, 0x02 }, { PS5169_REG_DP_LANES, 0x00 },
++			{ PS5169_REG_USB_DIR, 0x00 },
++			{ PS5169_REG_RX_TERM1, 0x00 }, { PS5169_REG_RX_TERM2, 0x00 },
++		};
++
++		ret = ps5169_write_seq(ps, seq, ARRAY_SIZE(seq));
++		break;
++	}
++	case PS5169_USB: {
++		/* 0x04 = 0x00 is Samsung's host (DFP) setting; device mode used
++		 * 0x44 there. Only the data role knows which, and the mux state
++		 * does not carry it, so the host value is used for both.
++		 */
++		const struct ps5169_reg seq[] = {
++			{ PS5169_REG_CONFIG, PS5169_CFG_USB | cfg },
++			{ PS5169_REG_DP_PATH, 0x02 }, { PS5169_REG_USB_DIR, 0x00 },
++			{ PS5169_REG_RX_TERM1, 0x01 }, { PS5169_REG_RX_TERM2, 0x01 },
++		};
++
++		ret = ps5169_write_seq(ps, seq, ARRAY_SIZE(seq));
++		break;
++	}
++	case PS5169_DP4: {
++		const struct ps5169_reg seq[] = {
++			{ PS5169_REG_CONFIG, PS5169_CFG_DP4 | cfg },
++			{ PS5169_REG_DP_PATH, 0x00 }, { PS5169_REG_DP_LANES, 0x04 },
++		};
++
++		ret = ps5169_write_seq(ps, seq, ARRAY_SIZE(seq));
++		break;
++	}
++	case PS5169_DP2_USB: {
++		const struct ps5169_reg seq[] = {
++			{ PS5169_REG_CONFIG, PS5169_CFG_DP2_USB | cfg },
++			{ PS5169_REG_DP_PATH, 0x00 }, { PS5169_REG_DP_LANES, 0x04 },
++			{ PS5169_REG_USB_DIR, 0x00 },
++			{ PS5169_REG_RX_TERM1, 0x01 }, { PS5169_REG_RX_TERM2, 0x01 },
++		};
++
++		ret = ps5169_write_seq(ps, seq, ARRAY_SIZE(seq));
++		break;
++	}
++	default:
++		return -EINVAL;
++	}
++	if (ret)
++		return ret;
++
++	ps->applied = mode;
++	ps->applied_flip = flip;
++	dev_info(&ps->client->dev, "%s%s (0x40=0x%02x)\n", ps5169_mode_names[mode],
++		 mode == PS5169_OFF ? "" : flip ? ", flipped" : ", normal",
++		 i2c_smbus_read_byte_data(ps->client, PS5169_REG_CONFIG));
++	return 0;
++}
++
++static int ps5169_switch_set(struct typec_switch_dev *sw,
++			     enum typec_orientation orientation)
++{
++	struct ps5169 *ps = typec_switch_get_drvdata(sw);
++	int ret;
++
++	/* The PHY first, so its lanes are right before the redriver passes
++	 * signals through.
++	 */
++	if (phy_follow) {
++		ret = typec_switch_set(ps->typec_switch, orientation);
++		if (ret)
++			return ret;
++	}
++
++	mutex_lock(&ps->lock);
++	ps->orientation = orientation;
++	ret = ps5169_apply(ps);
++	mutex_unlock(&ps->lock);
++
++	return ret;
++}
++
++static int ps5169_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
++{
++	struct ps5169 *ps = typec_mux_get_drvdata(mux);
++	int ret;
++
++	mutex_lock(&ps->lock);
++	ps->state = state->mode;
++	ret = ps5169_apply(ps);
++	mutex_unlock(&ps->lock);
++	if (ret)
++		return ret;
++
++	return typec_mux_set(ps->typec_mux, state);
++}
++
++static int ps5169_init(struct ps5169 *ps)
++{
++	int id1, id2, ret;
++
++	id1 = i2c_smbus_read_byte_data(ps->client, PS5169_REG_CHIP_ID1);
++	id2 = i2c_smbus_read_byte_data(ps->client, PS5169_REG_CHIP_ID2);
++	if (id1 < 0 || id2 < 0)
++		return id1 < 0 ? id1 : id2;
++	if (id1 != PS5169_CHIP_ID1 || id2 != PS5169_CHIP_ID2) {
++		dev_err(&ps->client->dev, "unexpected chip id %02x/%02x\n", id1, id2);
++		return -ENODEV;
++	}
++
++	ret = ps5169_write(ps, PS5169_REG_RESET, 0x80);
++	if (ret)
++		return ret;
++	usleep_range(10000, 11000);
++	ret = ps5169_write(ps, PS5169_REG_RESET, 0x00);
++	if (ret)
++		return ret;
++	ret = ps5169_write_seq(ps, ps5169_init_seq, ARRAY_SIZE(ps5169_init_seq));
++	if (ret)
++		return ret;
++
++	ps->applied = PS5169_OFF;
++	return 0;
++}
++
++static int ps5169_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct typec_switch_desc sw_desc = { };
++	struct typec_mux_desc mux_desc = { };
++	struct ps5169 *ps;
++	int ret;
++
++	ps = devm_kzalloc(dev, sizeof(*ps), GFP_KERNEL);
++	if (!ps)
++		return -ENOMEM;
++
++	ps->client = client;
++	ps->orientation = TYPEC_ORIENTATION_NONE;
++	ps->state = TYPEC_STATE_SAFE;
++	mutex_init(&ps->lock);
++
++	ps->typec_switch = fwnode_typec_switch_get(dev_fwnode(dev));
++	if (IS_ERR(ps->typec_switch))
++		return dev_err_probe(dev, PTR_ERR(ps->typec_switch),
++				     "failed to get the PHY orientation switch\n");
++
++	ps->typec_mux = fwnode_typec_mux_get(dev_fwnode(dev));
++	if (IS_ERR(ps->typec_mux)) {
++		ret = dev_err_probe(dev, PTR_ERR(ps->typec_mux),
++				    "failed to get the PHY mode switch\n");
++		goto err_switch_put;
++	}
++
++	ret = ps5169_init(ps);
++	if (ret) {
++		dev_err_probe(dev, ret, "initialisation failed\n");
++		goto err_mux_put;
++	}
++
++	ret = drm_aux_bridge_register(dev);
++	if (ret)
++		goto err_mux_put;
++
++	sw_desc.drvdata = ps;
++	sw_desc.fwnode = dev_fwnode(dev);
++	sw_desc.set = ps5169_switch_set;
++	ps->sw = typec_switch_register(dev, &sw_desc);
++	if (IS_ERR(ps->sw)) {
++		ret = dev_err_probe(dev, PTR_ERR(ps->sw), "failed to register switch\n");
++		goto err_mux_put;
++	}
++
++	mux_desc.drvdata = ps;
++	mux_desc.fwnode = dev_fwnode(dev);
++	mux_desc.set = ps5169_mux_set;
++	ps->mux = typec_mux_register(dev, &mux_desc);
++	if (IS_ERR(ps->mux)) {
++		ret = dev_err_probe(dev, PTR_ERR(ps->mux), "failed to register mux\n");
++		goto err_switch_unregister;
++	}
++
++	i2c_set_clientdata(client, ps);
++	dev_info(dev, "PS5169 ready\n");
++	return 0;
++
++err_switch_unregister:
++	typec_switch_unregister(ps->sw);
++err_mux_put:
++	typec_mux_put(ps->typec_mux);
++err_switch_put:
++	typec_switch_put(ps->typec_switch);
++	return ret;
++}
++
++static void ps5169_remove(struct i2c_client *client)
++{
++	struct ps5169 *ps = i2c_get_clientdata(client);
++
++	typec_mux_unregister(ps->mux);
++	typec_switch_unregister(ps->sw);
++	ps5169_write(ps, PS5169_REG_CONFIG, PS5169_CFG_OFF);
++	typec_mux_put(ps->typec_mux);
++	typec_switch_put(ps->typec_switch);
++}
++
++static const struct of_device_id ps5169_of_match[] = {
++	{ .compatible = "parade,ps5169" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ps5169_of_match);
++
++static struct i2c_driver ps5169_driver = {
++	.driver = {
++		.name = "ps5169",
++		.of_match_table = ps5169_of_match,
++	},
++	.probe = ps5169_probe,
++	.remove = ps5169_remove,
++};
++module_i2c_driver(ps5169_driver);
++
++MODULE_DESCRIPTION("Parade PS5169 USB3/DP Type-C redriver");
++MODULE_LICENSE("GPL");

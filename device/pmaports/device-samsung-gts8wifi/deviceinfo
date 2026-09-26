@@ -1,0 +1,33 @@
+# Reference: <https://postmarketos.org/deviceinfo>
+deviceinfo_format_version="0"
+deviceinfo_name="Samsung Galaxy Tab S8 (Wi-Fi)"
+deviceinfo_manufacturer="Samsung"
+deviceinfo_codename="samsung-gts8wifi"
+deviceinfo_year="2022"
+deviceinfo_arch="aarch64"
+
+deviceinfo_chassis="tablet"
+# Portrait-native panel (the X800/Tab S8+ is landscape-native).
+deviceinfo_screen_width="1600"
+deviceinfo_screen_height="2560"
+
+# The image flashed to BOOT is built on a PC by boot/build-from-pmos.sh (uniLoader wrapping
+# the kernel, DTB and initramfs), not by boot-deploy. heimdall-bootimg keeps
+# `pmbootstrap install` producing the /boot layout that script consumes.
+deviceinfo_flash_method="heimdall-bootimg"
+deviceinfo_generate_bootimg="true"
+deviceinfo_header_version="4"
+deviceinfo_bootimg_qcdt="false"
+deviceinfo_flash_pagesize="4096"
+deviceinfo_dtb="qcom/sm8450-samsung-gts8wifi"
+deviceinfo_bootimg_custom_args="--base 0x00000000 --kernel_offset 0x00008000 --ramdisk_offset 0x02000000 --tags_offset 0x01e00000 --dtb_offset 0x01f00000"
+deviceinfo_bootimg_append_seandroidenforce="true"
+deviceinfo_flash_heimdall_partition_kernel="boot"
+deviceinfo_flash_heimdall_partition_rootfs="userdata"
+
+# Informational only: uniLoader passes no command line; the real one is /chosen/bootargs
+# in the DTS (boot/build-boot-img.sh --append-bootargs adds to it).
+deviceinfo_kernel_cmdline="console=tty0 quiet loglevel=4 panic=10 plymouth.enable=0 arm-smmu.disable_bypass=0 usbcore.autosuspend=-1"
+
+deviceinfo_rootfs_image_sector_size="4096"
+deviceinfo_create_initfs_extra="true"

@@ -1,0 +1,5 @@
+# iio-sensor-proxy (libssc) accelerometer mount matrix. The X700 panel is portrait-native:
+# "normal" is portrait with the USB-C port at the bottom (camera edge on the right).
+# Measured: raw +X = camera edge, +Y = up in that pose, +Z = out of the screen;
+# libssc wants (a.left, a.down, a.out) = (-x, -y, z).
+SUBSYSTEM=="misc", KERNEL=="fastrpc-*", ENV{ACCEL_MOUNT_MATRIX}+="-1, 0, 0; 0, -1, 0; 0, 0, 1"

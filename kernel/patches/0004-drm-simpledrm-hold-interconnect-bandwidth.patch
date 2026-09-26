@@ -1,0 +1,155 @@
+drm/simpledrm: hold an interconnect bandwidth vote
+
+--- a/drivers/gpu/drm/tiny/simpledrm.c
++++ b/drivers/gpu/drm/tiny/simpledrm.c
+@@ -2,6 +2,7 @@
+ 
+ #include <linux/aperture.h>
+ #include <linux/clk.h>
++#include <linux/interconnect.h>
+ #include <linux/of_clk.h>
+ #include <linux/minmax.h>
+ #include <linux/of_address.h>
+@@ -235,6 +236,11 @@
+ 	struct device **pwr_dom_devs;
+ 	struct device_link **pwr_dom_links;
+ #endif
++	/* interconnects */
++#if defined CONFIG_OF && defined CONFIG_INTERCONNECT
++	unsigned int icc_count;
++	struct icc_path **icc_paths;
++#endif
+ 
+ 	/* simplefb settings */
+ 	struct drm_display_mode mode;
+@@ -571,6 +577,118 @@
+ }
+ #endif
+ 
++#if defined CONFIG_OF && defined CONFIG_INTERCONNECT
++/*
++ * Interconnect handling code.
++ *
++ * Here we handle the interconnects property of our "simple-framebuffer" dt
++ * node. This is necessary on SoCs where the display block fetches pixels over
++ * a bus fabric whose bandwidth is voted for rather than fixed (Qualcomm being
++ * the common case).
++ *
++ * The interconnect core keeps every node at a maximal boot-time bandwidth
++ * floor (icc_node_add() seeds init_avg/init_peak) so that the configuration
++ * left behind by the bootloader keeps working. That floor is dropped once all
++ * interconnect providers have synced state, which the driver core triggers at
++ * the deferred-probe timeout. If nothing has voted for the display path by
++ * then, the bandwidth it was handed off with disappears: the display block
++ * keeps scanning out, with its clocks and power-domains still held, but can no
++ * longer fetch pixels from memory. The visible result is an underrunning,
++ * flickering panel that goes blank a few seconds into boot.
++ *
++ * simpledrm therefore has to hold a bandwidth request of its own for as long
++ * as it owns the framebuffer, exactly as it holds the clocks and power
++ * domains. On unload we drop the request and release the paths.
++ *
++ * As with clocks and regulators, we only complain about errors here and
++ * otherwise carry on: the most likely cause is a mismatch between the
++ * bootloader-provided dt node and the interconnect providers, and failing the
++ * probe would leave the user with no framebuffer at all rather than a
++ * degraded one.
++ */
++static void simpledrm_device_release_interconnects(void *res)
++{
++	struct simpledrm_device *sdev = res;
++	unsigned int i;
++
++	for (i = 0; i < sdev->icc_count; ++i) {
++		if (!sdev->icc_paths[i])
++			continue;
++		icc_set_bw(sdev->icc_paths[i], 0, 0);
++		icc_put(sdev->icc_paths[i]);
++		sdev->icc_paths[i] = NULL;
++	}
++	sdev->icc_count = 0;
++}
++
++static int simpledrm_device_init_interconnects(struct simpledrm_device *sdev)
++{
++	struct drm_device *dev = &sdev->dev;
++	struct platform_device *pdev = to_platform_device(dev->dev);
++	struct device_node *of_node = pdev->dev.of_node;
++	struct icc_path *path;
++	u64 bytes_per_sec;
++	u32 avg_bw, peak_bw;
++	int count, i, ret;
++
++	if (dev_get_platdata(&pdev->dev) || !of_node)
++		return 0;
++
++	/* "interconnects" lists one source/sink phandle pair per path. */
++	count = of_count_phandle_with_args(of_node, "interconnects",
++					   "#interconnect-cells");
++	if (count <= 0)
++		return 0;
++	count /= 2;
++
++	sdev->icc_paths = devm_kcalloc(&pdev->dev, count,
++				       sizeof(*sdev->icc_paths), GFP_KERNEL);
++	if (!sdev->icc_paths)
++		return -ENOMEM;
++
++	/*
++	 * The scanout engine re-reads the whole framebuffer once per frame.
++	 * Vote for that rate plus headroom, since the real fetch is bursty and
++	 * we have no visibility into the hardware's fetch-ahead behaviour.
++	 */
++	bytes_per_sec = (u64)sdev->pitch * sdev->mode.vdisplay *
++			drm_mode_vrefresh(&sdev->mode);
++	avg_bw = min_t(u64, U32_MAX, div_u64(bytes_per_sec * 3, 2 * 1000));
++	peak_bw = min_t(u64, U32_MAX, div_u64(bytes_per_sec * 2, 1000));
++
++	for (i = 0; i < count; ++i) {
++		path = of_icc_get_by_index(&pdev->dev, i);
++		if (IS_ERR(path)) {
++			ret = PTR_ERR(path);
++			if (ret == -EPROBE_DEFER) {
++				simpledrm_device_release_interconnects(sdev);
++				return ret;
++			}
++			drm_warn(dev, "failed to get interconnect %d: %d\n", i, ret);
++			continue;
++		}
++		sdev->icc_paths[i] = path;
++		sdev->icc_count = i + 1;
++
++		ret = icc_set_bw(path, avg_bw, peak_bw);
++		if (ret)
++			drm_warn(dev, "failed to vote %u/%u kBps on interconnect %d: %d\n",
++				 avg_bw, peak_bw, i, ret);
++	}
++
++	if (!sdev->icc_count)
++		return 0;
++
++	return devm_add_action_or_reset(&pdev->dev,
++					simpledrm_device_release_interconnects, sdev);
++}
++#else
++static int simpledrm_device_init_interconnects(struct simpledrm_device *sdev)
++{
++	return 0;
++}
++#endif
++
+ /*
+  * Modesetting
+  */
+@@ -875,6 +993,11 @@
+ 	drm_dbg(dev, "framebuffer format=%p4cc, size=%dx%d, stride=%d byte\n",
+ 		&format->format, width, height, stride);
+ 
++	/* Needs sdev->mode and sdev->pitch to size the bandwidth request. */
++	ret = simpledrm_device_init_interconnects(sdev);
++	if (ret)
++		return ERR_PTR(ret);
++
+ 	/*
+ 	 * Memory management
+ 	 */

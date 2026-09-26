@@ -1,0 +1,110 @@
+#!/bin/sh
+# Install the device-specific firmware that no package may ship, from the tablet's own
+# stock partitions (run as root, once after installing, and again after a USERDATA reflash):
+#
+#   gts8wifi-firmware-setup                     read apnhlos + vendor (inside super) here
+#   gts8wifi-firmware-setup --apnhlos DIR --vendor DIR
+#                                               use a copy extracted on a PC with
+#                                               tools/extract-firmware.sh
+#
+# Installs (none of it package-owned, so apk upgrades leave it alone):
+#   /usr/lib/firmware/qcom/sm8450/gts8wifi/  a730_zap.* (GPU), adsp.* (audio DSP), slpi.* (sensor DSP)
+#       All three are signed for this device. They also go into the initramfs
+#       (mkinitfs runs at the end): the kernel boots the DSPs and the GPU before the rootfs.
+#   /usr/lib/firmware/ath11k/WCN6855/hw2.1/  amss.bin + m3.bin (Samsung WLAN.HSP.2.0) and a
+#       board-2.bin whose entry for this chip points at Samsung's bdwlang.elf. Upstream
+#       firmware and board data scan 2.4 GHz only; Samsung's BDF crashes upstream firmware.
+#   the SLPI sensor tree (gts8wifi-sensors-setup) from vendor /etc/sensors + persist.
+set -eu
+FW=/usr/lib/firmware
+DEV=$FW/qcom/sm8450/gts8wifi
+WLAN=$FW/ath11k/WCN6855/hw2.1
+LIBEXEC=/usr/libexec/gts8wifi
+apnhlos= vendor= mnt=
+
+usage() { sed -n 2,8p "$0" >&2; exit 2; }
+while [ $# -gt 0 ]; do
+	case $1 in
+	--apnhlos) apnhlos=$2; shift 2 ;;
+	--vendor) vendor=$2; shift 2 ;;
+	*) usage ;;
+	esac
+done
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+cleanup() {
+	[ -n "$mnt" ] || return 0
+	umount "$mnt/apnhlos" 2>/dev/null || true
+	dmsetup remove gts8wifi-vendor 2>/dev/null || true
+	rm -rf "$mnt"
+}
+trap cleanup EXIT
+
+if [ -z "$apnhlos" ] || [ -z "$vendor" ]; then
+	mnt=$(mktemp -d)
+	mkdir "$mnt/apnhlos" "$mnt/vendor"
+fi
+
+if [ -z "$apnhlos" ]; then
+	# NON-HLOS.bin is flashed to apnhlos (FAT)
+	mount -o ro /dev/disk/by-partlabel/apnhlos "$mnt/apnhlos"
+	apnhlos=$mnt/apnhlos
+fi
+
+if [ -z "$vendor" ]; then
+	# vendor is a logical partition inside super, in one or more extents: map them
+	# read-only with dm-linear ("start .. end linear super offset", 512-byte sectors).
+	super=$(readlink -f /dev/disk/by-partlabel/super)
+	table=$(lpdump "$super" | awk -v dev="$super" '
+		/^Slot [1-9]/ { exit }
+		/^ *Name: / { p = $2 }
+		p == "vendor" && / linear super / { print $1, $3 - $1 + 1, "linear", dev, $6 }')
+	[ -n "$table" ] || { echo "vendor not found in super (use --vendor)" >&2; exit 1; }
+	modprobe dm-mod 2>/dev/null || true
+	echo "$table" | dmsetup create --readonly gts8wifi-vendor
+	# Samsung's vendor files use F2FS compression, which the kernel may not have:
+	# read them with our own parser instead of mounting.
+	vdev=/dev/mapper/gts8wifi-vendor
+	for f in amss20.bin m3.bin bdwlang.elf; do
+		python3 "$LIBEXEC/f2fs_extract.py" "$vdev" extract "/firmware/qca6490/$f" \
+			"$mnt/vendor/firmware/qca6490/$f" >/dev/null
+	done
+	python3 "$LIBEXEC/f2fs_extract.py" "$vdev" extractdir /etc/sensors \
+		"$mnt/vendor/etc/sensors" >/dev/null
+	vendor=$mnt/vendor
+fi
+
+img=$apnhlos/image
+[ -f "$img/adsp.mdt" ] || img=$apnhlos
+qca=$vendor/firmware/qca6490
+
+echo ">> GPU, audio and sensor DSP images -> $DEV"
+install -d "$DEV"
+for f in "$img"/a730_zap.mdt "$img"/a730_zap.b0? "$img"/adsp.mdt "$img"/adsp.b?? \
+	"$img"/slpi.mdt "$img"/slpi.b??; do
+	[ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
+	install -m644 "$f" "$DEV/"
+done
+
+echo ">> Wi-Fi (Samsung firmware + 5 GHz board data) -> $WLAN"
+for f in amss20.bin m3.bin bdwlang.elf; do
+	[ -f "$qca/$f" ] || { echo "missing: $qca/$f" >&2; exit 1; }
+done
+install -d "$WLAN"
+install -m644 "$qca/amss20.bin" "$WLAN/amss.bin"
+install -m644 "$qca/m3.bin" "$WLAN/m3.bin"
+upstream=$WLAN/board-2.bin.zst
+[ -e "$upstream" ] || upstream=$FW/ath11k/WCN6855/hw2.0/board-2.bin.zst
+python3 "$LIBEXEC/mk-ath11k-board2.py" "$upstream" "$qca/bdwlang.elf" "$WLAN/board-2.bin.new"
+mv "$WLAN/board-2.bin.new" "$WLAN/board-2.bin"
+
+echo ">> sensor configuration"
+gts8wifi-sensors-setup --from "$vendor/etc/sensors"
+
+echo ">> rebuilding the initramfs"
+mkinitfs
+
+cat <<'EOF'
+>> done. The boot image embeds the initramfs: rebuild boot.img from this rootfs's /boot
+   (boot/build-from-pmos.sh on a PC) and flash it, then reboot.
+EOF

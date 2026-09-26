@@ -1,0 +1,13 @@
+[Unit]
+Description=Power the SLPI sensor rail (pm8350c L2C)
+ConditionPathExists=/sys/devices/platform/sensor-vdd/state
+Before=hexagonrpcd-sdsp.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo enabled > /sys/devices/platform/sensor-vdd/state'
+ExecStop=/bin/sh -c 'echo disabled > /sys/devices/platform/sensor-vdd/state'
+
+[Install]
+WantedBy=multi-user.target

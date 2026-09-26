@@ -1,0 +1,67 @@
+#!/bin/sh
+# Provision the SLPI sensor tree on the tablet (run as root, once, after installing the
+# device package):
+#
+#   gts8wifi-sensors-setup --from DIR
+#
+# DIR holds the stock sensor configuration, extracted on a PC from your own firmware with
+# tools/extract-sensors-from-super.sh:   DIR/config/*.json   DIR/sns_reg_config
+#
+# Builds /usr/share/qcom/sm8450/Samsung/gts8wifi/{sensors,socinfo}: configs, sns_reg.conf
+# (revision line pointed at socinfo), a writable persist/registry seeded from the tablet's
+# own stock `persist` partition (this unit's factory calibration), and the socinfo values
+# the SLPI reads as /sys/devices/soc0. An existing registry is left alone (the SLPI keeps
+# its own state there) unless --refresh-registry is given.
+set -e
+HFS=/usr/share/qcom/sm8450/Samsung/gts8wifi
+PERSIST=/dev/disk/by-partlabel/persist
+from= refresh=
+while [ $# -gt 0 ]; do
+    case $1 in --from) from=$2; shift 2;; --refresh-registry) refresh=1; shift;;
+        *) echo "usage: $0 --from DIR [--refresh-registry]" >&2; exit 2;; esac
+done
+[ -d "$from/config" ] && [ -f "$from/sns_reg_config" ] || { echo "need $from/config and $from/sns_reg_config" >&2; exit 2; }
+grep -q '^fastrpc:' /etc/passwd || { echo "user fastrpc missing: install hexagonrpcd" >&2; exit 1; }
+
+rm -rf "$HFS/sensors/config" "$HFS/socinfo"
+install -d -m755 "$HFS/sensors/config" "$HFS/socinfo"
+cp "$from"/config/*.json "$HFS/sensors/config/"
+chmod 644 "$HFS"/sensors/config/*.json
+# the SLPI wants this from a Samsung sysfs node the mainline kernel lacks: serve it from socinfo
+sed 's#^file=revision=.*#file=revision=/sys/devices/soc0/ssc_hw_rev#' "$from/sns_reg_config" > "$HFS/sensors/sns_reg.conf"
+grep -q '^file=output=/mnt/vendor/persist/sensors/registry/registry$' "$HFS/sensors/sns_reg.conf" \
+    || { echo "sns_reg_config looks truncated (extract with the fixed f2fs_extract.py)" >&2; exit 1; }
+chmod 644 "$HFS/sensors/sns_reg.conf"
+
+cat /sys/devices/soc0/soc_id > "$HFS/socinfo/soc_id"
+echo MTP > "$HFS/socinfo/hw_platform"
+echo Unknown > "$HFS/socinfo/platform_subtype"
+echo 0 > "$HFS/socinfo/platform_subtype_id"
+echo 0 > "$HFS/socinfo/platform_version"
+echo 4 > "$HFS/socinfo/ssc_hw_rev"   # Android ro.revision; any 0-31 satisfies the stock configs
+for f in revision family machine; do [ -f "/sys/devices/soc0/$f" ] && cp "/sys/devices/soc0/$f" "$HFS/socinfo/$f"; done
+chmod 644 "$HFS"/socinfo/*
+
+install -d -m755 "$HFS/sensors/persist"
+install -d -m775 "$HFS/sensors/persist/registry"
+ln -sfn persist/registry "$HFS/sensors/registry"
+if [ -z "$refresh" ] && [ -n "$(ls -A "$HFS/sensors/persist/registry")" ]; then
+    echo "registry already populated, left as is (--refresh-registry to replace it)"
+else
+    find "$HFS/sensors/persist/registry" -mindepth 1 -delete
+    PM=$(mktemp -d)
+    if [ -e "$PERSIST" ] && mount -o ro "$PERSIST" "$PM" 2>/dev/null; then
+        n=$(ls -A "$PM/sensors/registry/registry" 2>/dev/null | wc -l)
+        if [ "$n" -gt 0 ]; then
+            cp -R "$PM/sensors/registry/registry/." "$HFS/sensors/persist/registry/"
+            [ -f "$PM/sensors/registry/sns_reg_version" ] \
+                && cp "$PM/sensors/registry/sns_reg_version" "$HFS/sensors/persist/sns_reg_version"
+            echo "registry seeded from the stock persist partition ($n files)"
+        else echo "persist has no sensor registry; the SLPI will build one"; fi
+        umount "$PM"
+    else echo "persist not mountable; the SLPI will build a registry"; fi
+    rmdir "$PM"
+fi
+chown -R fastrpc:fastrpc "$HFS"
+find "$HFS/sensors/persist" -type f -exec chmod 644 {} +
+echo "done. Reboot (the SLPI reads this tree once, at its own start)."

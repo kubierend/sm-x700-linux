@@ -1,0 +1,22 @@
+interconnect: qcom: sm8450: use the SM8450_-prefixed IDs in two node links
+
+--- a/drivers/interconnect/qcom/sm8450.c
++++ b/drivers/interconnect/qcom/sm8450.c
+@@ -738,7 +738,7 @@
+ 	.channels = 1,
+ 	.buswidth = 4,
+ 	.num_links = 1,
+-	.links = { MASTER_CDSP_NOC_CFG },
++	.links = { SM8450_MASTER_CDSP_NOC_CFG },
+ };
+ 
+ static struct qcom_icc_node qhs_cpr_cx = {
+@@ -835,7 +835,7 @@
+ 	.channels = 1,
+ 	.buswidth = 4,
+ 	.num_links = 1,
+-	.links = { MASTER_CNOC_LPASS_AG_NOC },
++	.links = { SM8450_MASTER_CNOC_LPASS_AG_NOC },
+ };
+ 
+ static struct qcom_icc_node qhs_mss_cfg = {
