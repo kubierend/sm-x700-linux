@@ -6,6 +6,10 @@
 #   gts8wifi-firmware-setup --apnhlos DIR --vendor DIR
 #                                               use a copy extracted on a PC with
 #                                               tools/extract-firmware.sh
+#   --firmware-dir DIR   install the firmware under DIR instead of /usr/lib/firmware and
+#                        skip mkinitfs (NixOS: the configuration points at DIR)
+#   --hexagonfs DIR      SLPI sensor tree location (passed to gts8wifi-sensors-setup)
+#   --upstream-board F   linux-firmware's WCN6855 board-2.bin[.zst|.xz] (default: searched)
 #
 # Installs (none of it package-owned, so apk upgrades leave it alone):
 #   /usr/lib/firmware/qcom/sm8450/gts8wifi/  a730_zap.* (GPU), adsp.* (audio DSP), slpi.* (sensor DSP)
@@ -17,19 +21,23 @@
 #   the SLPI sensor tree (gts8wifi-sensors-setup) from vendor /etc/sensors + persist.
 set -eu
 FW=/usr/lib/firmware
-DEV=$FW/qcom/sm8450/gts8wifi
-WLAN=$FW/ath11k/WCN6855/hw2.1
-LIBEXEC=/usr/libexec/gts8wifi
-apnhlos= vendor= mnt=
+LIBEXEC=${GTS8WIFI_LIBEXEC:-/usr/libexec/gts8wifi}
+apnhlos= vendor= mnt= fwdir= hfs= upstream=
 
-usage() { sed -n 2,8p "$0" >&2; exit 2; }
+usage() { sed -n 2,13p "$0" >&2; exit 2; }
 while [ $# -gt 0 ]; do
 	case $1 in
 	--apnhlos) apnhlos=$2; shift 2 ;;
 	--vendor) vendor=$2; shift 2 ;;
+	--firmware-dir) fwdir=$2; shift 2 ;;
+	--hexagonfs) hfs=$2; shift 2 ;;
+	--upstream-board) upstream=$2; shift 2 ;;
 	*) usage ;;
 	esac
 done
+out=${fwdir:-$FW}
+DEV=$out/qcom/sm8450/gts8wifi
+WLAN=$out/ath11k/WCN6855/hw2.1
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 
 cleanup() {
@@ -93,13 +101,23 @@ done
 install -d "$WLAN"
 install -m644 "$qca/amss20.bin" "$WLAN/amss.bin"
 install -m644 "$qca/m3.bin" "$WLAN/m3.bin"
-upstream=$WLAN/board-2.bin.zst
-[ -e "$upstream" ] || upstream=$FW/ath11k/WCN6855/hw2.0/board-2.bin.zst
+if [ -z "$upstream" ]; then
+	for f in "$FW"/ath11k/WCN6855/hw2.1/board-2.bin.zst "$FW"/ath11k/WCN6855/hw2.0/board-2.bin.zst \
+		/run/current-system/firmware/ath11k/WCN6855/hw2.0/board-2.bin*; do
+		[ -e "$f" ] && { upstream=$f; break; }
+	done
+fi
+[ -n "$upstream" ] || { echo "no upstream WCN6855 board-2.bin (use --upstream-board)" >&2; exit 1; }
 python3 "$LIBEXEC/mk-ath11k-board2.py" "$upstream" "$qca/bdwlang.elf" "$WLAN/board-2.bin.new"
 mv "$WLAN/board-2.bin.new" "$WLAN/board-2.bin"
 
 echo ">> sensor configuration"
-gts8wifi-sensors-setup --from "$vendor/etc/sensors"
+gts8wifi-sensors-setup --from "$vendor/etc/sensors" ${hfs:+--hexagonfs "$hfs"}
+
+if [ -n "$fwdir" ]; then
+	echo ">> done. Firmware is in $fwdir: point the system configuration at it and rebuild."
+	exit 0
+fi
 
 echo ">> rebuilding the initramfs"
 mkinitfs

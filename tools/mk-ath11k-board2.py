@@ -8,7 +8,7 @@ firmware. This rewrites the upstream linux-firmware WCN6855 board-2.bin so the e
 the chip asks for (17cb:0108, chip 18, board 255) carries that BDF; every other entry
 is kept.
 
-    mk-ath11k-board2.py UPSTREAM_board-2.bin[.zst] bdwlang.elf OUT_board-2.bin
+    mk-ath11k-board2.py UPSTREAM_board-2.bin[.zst|.xz] bdwlang.elf OUT_board-2.bin
 """
 import struct
 import subprocess
@@ -42,6 +42,8 @@ def main(src, bdf, out):
     raw = open(src, "rb").read()
     if src.endswith(".zst"):
         raw = subprocess.run(["zstd", "-dc"], input=raw, check=True, capture_output=True).stdout
+    elif src.endswith(".xz"):
+        raw = subprocess.run(["xz", "-dc"], input=raw, check=True, capture_output=True).stdout
     hdr = pad4(len(MAGIC))
     if raw[:len(MAGIC)] != MAGIC:
         sys.exit("not an ath11k board-2.bin")

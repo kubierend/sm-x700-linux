@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check arm64 payload placement and static DT memory reservations (no device I/O)."""
 import argparse
+import os
 import pathlib
 import re
 import struct
@@ -93,7 +94,7 @@ def main():
         errors.append("kernel/initramfs exceed the arm64 32 GiB window")
     if args.loader_elf:
         output = subprocess.check_output(
-            ["aarch64-linux-gnu-nm", "-n", str(args.loader_elf)], text=True)
+            [os.environ.get("NM", "aarch64-linux-gnu-nm"), "-n", str(args.loader_elf)], text=True)
         symbols = {name: int(addr, 16) for addr, name in
                    re.findall(r"^([0-9a-f]+)\s+\w\s+(\S+)$", output, re.M)}
         # reloc.S copies _reloc_size bytes starting at _start (past _head).
