@@ -1,0 +1,20 @@
+regulator: userspace-consumer: treat an unknown state as disabled
+
+--- a/drivers/regulator/userspace-consumer.c
++++ b/drivers/regulator/userspace-consumer.c
+@@ -179,8 +179,13 @@
+ 
+ 	ret = regulator_is_enabled(pdata->supplies[0].consumer);
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "Failed to get regulator status\n");
+-		goto err_enable;
++		/*
++		 * Some providers (e.g. qcom-rpmh-regulator) report -EINVAL until
++		 * the first enable/disable request: the state is unknown, not
++		 * an error. Start out as "disabled".
++		 */
++		dev_dbg(&pdev->dev, "regulator state unknown (%d), assuming disabled\n", ret);
++		ret = 0;
+ 	}
+ 	drvdata->enabled = !!ret;
+ 
